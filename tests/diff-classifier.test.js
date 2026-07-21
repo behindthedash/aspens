@@ -33,7 +33,7 @@ describe('diff-classifier', () => {
     });
 
     it('returns false for a single code-bearing file', () => {
-      const exts = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.go', '.rs', '.rb', '.java', '.kt', '.swift'];
+      const exts = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.go', '.rs', '.rb', '.java', '.kt', '.swift', '.php'];
       for (const ext of exts) {
         expect(isNoOpDiff([`src/file${ext}`])).toBe(false);
       }

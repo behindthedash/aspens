@@ -28,7 +28,7 @@ export const LOCK_FILES = new Set([
  */
 const CODE_BEARING_EXTS = new Set([
   '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
-  '.py', '.go', '.rs', '.rb', '.java', '.kt', '.swift',
+  '.py', '.go', '.rs', '.rb', '.java', '.kt', '.swift', '.php'
 ]);
 
 /**
