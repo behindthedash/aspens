@@ -80,6 +80,19 @@ function parseLLMOutput(text, allowedPaths, expectedPath) {
 // clarifying question instead (e.g. "I'd rather confirm than guess... let me
 // know") still gets wrapped in valid <file> tags, so parseLLMOutput accepts
 // it — this catches that case so it retries instead of being written as-is.
+// Real-world observation: even with explicit preservation instructions, the
+// model can still non-deterministically collapse a large existing doc down
+// to a small fraction of its length on any given run (observed: 434 lines
+// -> 6 lines on one run, -> 109 lines on another, same code/prompt). A
+// length-ratio check catches this class of bad roll regardless of *why* it
+// happened, the same way looksLikeConversationalNonAnswer catches a
+// different bad-roll shape.
+export function looksLikeDrasticContentLoss(newContent, existingContentLength, minRatio = 0.3) {
+  if (!existingContentLength || existingContentLength < 500) return false; // too small a baseline to judge
+  const newLength = (newContent || '').trim().length;
+  return newLength < existingContentLength * minRatio;
+}
+
 export function looksLikeConversationalNonAnswer(content) {
   const trimmed = (content || '').trim();
   if (!trimmed) return true;
@@ -1761,32 +1774,46 @@ async function generateChunked(repoPath, scan, repoGraph, domains, baseOnly, tim
     const claudeMdPrompt = loadPrompt('doc-init-claudemd', CANONICAL_VARS) + strategyNote +
       `\n\n---\n\nRepository path: ${repoPath}\n\n## Scan Results\nRepo: ${scan.name} (${scan.repoType})\nLanguages: ${scan.languages.join(', ')}\nFrameworks: ${scan.frameworks.join(', ')}\nEntry points: ${scan.entryPoints.join(', ')}\n\n## Generated Skills\n${skillSummaries}${rootGraphContext ? `\n\n${rootGraphContext}` : ''}${existingClaudeMdSection}`;
 
+    let existingContentLength = 0;
+    if (strategy === 'improve' && _reuseSourceTarget?.instructionsFile) {
+      try {
+        existingContentLength = readFileSync(join(repoPath, _reuseSourceTarget.instructionsFile), 'utf8').trim().length;
+      } catch { /* no existing file to compare against */ }
+    }
+
     try {
       let { text, usage } = await runLLM(claudeMdPrompt, makeClaudeOptions(timeoutMs, verbose, model, claudeMdSpinner), _backendId);
       trackUsage(usage, claudeMdPrompt.length);
       let files = parseLLMOutput(text, _allowedPaths, 'CLAUDE.md');
       let isConversational = files.length > 0 && looksLikeConversationalNonAnswer(files[0].content);
+      let isDrasticLoss = files.length > 0 && !isConversational && looksLikeDrasticContentLoss(files[0].content, existingContentLength);
 
-      // Retry up to 2 times if the LLM didn't produce parseable output, or
-      // produced a conversational non-answer instead of real content.
+      // Retry up to 2 times if the LLM didn't produce parseable output,
+      // produced a conversational non-answer instead of real content, or
+      // discarded most of the existing content it was supposed to preserve.
       const MAX_RETRIES = 2;
-      for (let attempt = 0; attempt < MAX_RETRIES && (files.length === 0 || isConversational); attempt++) {
+      for (let attempt = 0; attempt < MAX_RETRIES && (files.length === 0 || isConversational || isDrasticLoss); attempt++) {
         const retryPrompt = isConversational
           ? `Your previous response asked a clarifying question or hedged instead of generating the file. Do not ask questions — make your best judgment call and output the complete file now, wrapped in <file path="CLAUDE.md">...</file> tags, starting with a markdown heading. Your previous (invalid) response was:\n\n${text}`
-          : `Your previous response did not include the required <file path="...">content</file> XML tags. I need you to output CLAUDE.md wrapped in exactly this format:\n\n<file path="CLAUDE.md">\n# project-name\n[CLAUDE.md content]\n</file>\n\nHere is your previous output — please re-wrap it correctly:\n\n${text}`;
+          : isDrasticLoss
+            ? `Your previous response discarded most of the existing content instead of preserving it — this is unacceptable data loss. Re-read the "## Existing ${instructionsArtifactLabel()}" content in the original prompt and produce a version that keeps essentially ALL of its real information (architecture, conventions, rules, commands), reorganizing or lightly editing only where genuinely needed. Do not summarize it down. Output the complete file now, wrapped in <file path="CLAUDE.md">...</file> tags. Your previous (too-short) response was:\n\n${text}`
+            : `Your previous response did not include the required <file path="...">content</file> XML tags. I need you to output CLAUDE.md wrapped in exactly this format:\n\n<file path="CLAUDE.md">\n# project-name\n[CLAUDE.md content]\n</file>\n\nHere is your previous output — please re-wrap it correctly:\n\n${text}`;
         claudeMdSpinner.message(
           isConversational
             ? `${instructionsArtifactLabel()} looked like a question, not content — retry ${attempt + 1}/${MAX_RETRIES}...`
-            : `${instructionsArtifactLabel()} missing file tags — retry ${attempt + 1}/${MAX_RETRIES}...`
+            : isDrasticLoss
+              ? `${instructionsArtifactLabel()} discarded too much existing content — retry ${attempt + 1}/${MAX_RETRIES}...`
+              : `${instructionsArtifactLabel()} missing file tags — retry ${attempt + 1}/${MAX_RETRIES}...`
         );
         const retry = await runLLM(retryPrompt, makeClaudeOptions(timeoutMs, verbose, model, null), _backendId);
         trackUsage(retry.usage, retryPrompt.length);
         files = parseLLMOutput(retry.text, _allowedPaths, 'CLAUDE.md');
         isConversational = files.length > 0 && looksLikeConversationalNonAnswer(files[0].content);
+        isDrasticLoss = files.length > 0 && !isConversational && looksLikeDrasticContentLoss(files[0].content, existingContentLength);
         text = retry.text;
       }
 
-      if (files.length === 0 || isConversational) {
+      if (files.length === 0 || isConversational || isDrasticLoss) {
         claudeMdSpinner.stop(pc.yellow(`${instructionsArtifactLabel()} — failed after retries`));
         p.log.warn(`Could not generate ${instructionsArtifactLabel()}. Try: aspens doc init --strategy rewrite --mode base-only`);
       } else {

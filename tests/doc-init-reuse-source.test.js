@@ -7,6 +7,7 @@ import {
   targetHasSubstantiveInstructions,
   chooseReuseSourceTarget,
   looksLikeConversationalNonAnswer,
+  looksLikeDrasticContentLoss,
   buildOutputFilesForTargets,
 } from '../src/commands/doc-init.js';
 import { scanRepo } from '../src/lib/scanner.js';
@@ -112,6 +113,32 @@ describe('looksLikeConversationalNonAnswer', () => {
   it('flags empty content', () => {
     expect(looksLikeConversationalNonAnswer('')).toBe(true);
     expect(looksLikeConversationalNonAnswer(null)).toBe(true);
+  });
+});
+
+describe('looksLikeDrasticContentLoss', () => {
+  it('flags the real collapse observed live (434 lines -> 6 lines)', () => {
+    const existingLength = 12000; // datalena's real AGENTS.md is well over this
+    const collapsed = '@AGENTS.md\n\n## Skills\n\n- base\n'; // ~35 chars
+    expect(looksLikeDrasticContentLoss(collapsed, existingLength)).toBe(true);
+  });
+
+  it('does not flag a reasonable condensation', () => {
+    const existingLength = 1000;
+    const condensed = 'x'.repeat(500); // 50% retained
+    expect(looksLikeDrasticContentLoss(condensed, existingLength)).toBe(false);
+  });
+
+  it('does not flag when there was little existing content to begin with', () => {
+    // Below the 500-char floor -- not enough of a baseline to judge fairly.
+    expect(looksLikeDrasticContentLoss('short', 200)).toBe(false);
+  });
+
+  it('respects a custom minRatio', () => {
+    const existingLength = 1000;
+    const content = 'x'.repeat(400); // 40% retained
+    expect(looksLikeDrasticContentLoss(content, existingLength, 0.3)).toBe(false);
+    expect(looksLikeDrasticContentLoss(content, existingLength, 0.5)).toBe(true);
   });
 });
 
