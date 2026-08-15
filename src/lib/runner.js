@@ -290,6 +290,12 @@ export function runOpenCode(prompt, options = {}) {
   const promptFile = join(tmpdir(), `aspens-opencode-prompt-${Date.now()}.md`);
   writeFileSync(promptFile, prompt, 'utf8');
 
+  // model is spawned through a shell on Windows (see below) — reject
+  // anything outside a safe model-id charset before it can reach argv.
+  if (model && !/^[A-Za-z0-9_.\-/:]+$/.test(model)) {
+    throw new Error(`Invalid --model value for OpenCode: ${model}`);
+  }
+
   // The message must precede `-f` — `-f`/`--file` is a yargs array-type
   // option, so a bare positional placed after it gets swallowed into the
   // file array instead of being treated as the message.
@@ -300,7 +306,9 @@ export function runOpenCode(prompt, options = {}) {
     '-f', promptFile,
   ];
   if (model) args.push('--model', model);
-  if (cwd) args.push('--dir', cwd);
+  // Resolve to an absolute path: runOpenCode is exported and may receive a
+  // relative cwd, and on Windows this value is spawned through a shell.
+  if (cwd) args.push('--dir', resolve(cwd));
 
   const cleanupPromptFile = () => {
     try { rmSync(promptFile, { force: true }); } catch { /* ignore */ }
