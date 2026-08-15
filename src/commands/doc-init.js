@@ -287,27 +287,30 @@ export async function docInitCommand(path, options) {
   // --- Step 2: Target selection (what to generate FOR) ---
   let targetIds;
   if (options.target) {
-    targetIds = options.target === 'all' ? Object.keys(TARGETS) : [options.target];
+    targetIds = [options.target];
   } else if (recommendedTargetIds?.length) {
     targetIds = recommendedTargetIds;
   } else if (recommended) {
     targetIds = [backend.id];
   } else {
-    const availableTargetIds = Object.keys(TARGETS).filter(id => available[id]);
-    if (availableTargetIds.length > 1) {
+    // A target is an output format, not a backend — aspens transforms the
+    // canonical output into each target itself, so offer every configured
+    // target regardless of which generating CLI is installed. (available[]
+    // gates backend selection only, in Step 1.)
+    const targetChoiceIds = Object.keys(TARGETS);
+    if (targetChoiceIds.length > 1) {
       const selected = await p.multiselect({
         message: 'Generate docs for which coding agents?',
-        options: availableTargetIds.map(id => ({
+        options: targetChoiceIds.map(id => ({
           value: id,
           label: TARGETS[id].label,
         })),
-        initialValues: [backend.id], // pre-select matching target
+        initialValues: [backend.id], // pre-select the target matching the backend
         required: true,
       });
       if (p.isCancel(selected)) { p.cancel('Aborted'); return; }
       targetIds = selected;
     } else {
-      // Only one CLI — generate for matching target
       targetIds = [backend.id];
     }
   }
@@ -745,7 +748,7 @@ export async function docInitCommand(path, options) {
   // Generation always produces Claude-canonical format (.claude/skills/, CLAUDE.md).
   // For Claude target: canonical files are the final output (no transform needed).
   // For non-Claude targets: transform canonical → target format.
-  // For --target all: keep canonical + add transformed for each non-Claude target.
+  // For multiple targets: keep canonical + add transformed for each non-Claude target.
   const canonicalFiles = [...allFiles]; // preserve originals
   if (!shouldWriteIncrementally) {
     allFiles = buildOutputFilesForTargets(canonicalFiles, targets, scan, graphSerialized, repoPath);

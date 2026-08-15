@@ -1,8 +1,8 @@
 /**
  * Target abstraction layer — maps logical output locations to concrete paths per target.
  *
- * Backend = what generates the content (claude, codex)
- * Target  = where the output goes (claude, codex, all)
+ * Backend = what generates the content (claude, codex, opencode)
+ * Target  = where the output goes (claude, codex, opencode)
  */
 
 import { existsSync, readFileSync, writeFileSync } from 'fs';
@@ -109,11 +109,10 @@ export function resolveTarget(id) {
 
 /**
  * Resolve target option to an array of targets.
- * @param {string} option — 'claude', 'codex', or 'all'
+ * @param {string} option — a target id: 'claude', 'codex', or 'opencode'
  * @returns {object[]} array of target definitions
  */
 export function resolveTargets(option) {
-  if (option === 'all') return Object.values(TARGETS);
   return [resolveTarget(option)];
 }
 
