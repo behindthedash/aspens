@@ -19,7 +19,14 @@ export function scanRepo(repoPath, { extraDomains } = {}) {
     hasClaudeMd: existsSync(join(repoPath, 'CLAUDE.md')),
     hasCodexConfig: existsSync(join(repoPath, '.codex')),
     hasAgentsMd: existsSync(join(repoPath, 'AGENTS.md')),
+    cicd: detectCICD(repoPath),
+    database: detectDatabaseTools(repoPath),
+    apiSpecs: detectAPISpecs(repoPath),
   };
+
+  if (result.frameworks.includes('nextjs')) {
+    result.nextjsArchitecture = probeNextjsArchitecture(repoPath);
+  }
 
   // Merge user-specified domains
   if (extraDomains && extraDomains.length > 0) {
@@ -255,6 +262,184 @@ function detectFrameworks(repoPath) {
   }
 
   return found;
+}
+
+// --- CI/CD Detection (aspenkit/aspens#5) ---
+
+function detectCICD(repoPath) {
+  const detected = [];
+
+  const workflowsDir = join(repoPath, '.github', 'workflows');
+  if (existsSync(workflowsDir)) {
+    const files = listDir(workflowsDir);
+    if (files.some(f => f.endsWith('.yml') || f.endsWith('.yaml'))) {
+      detected.push('github-actions');
+    }
+  }
+
+  if (existsSync(join(repoPath, '.gitlab-ci.yml'))) detected.push('gitlab-ci');
+  if (existsSync(join(repoPath, '.circleci', 'config.yml'))) detected.push('circleci');
+  if (existsSync(join(repoPath, 'Jenkinsfile'))) detected.push('jenkins');
+  if (existsSync(join(repoPath, '.travis.yml'))) detected.push('travis-ci');
+  if (existsSync(join(repoPath, 'azure-pipelines.yml'))) detected.push('azure-pipelines');
+  if (existsSync(join(repoPath, 'bitbucket-pipelines.yml'))) detected.push('bitbucket-pipelines');
+  if (existsSync(join(repoPath, '.buildkite', 'pipeline.yml'))) detected.push('buildkite');
+
+  return detected;
+}
+
+// --- Database Migration Tool Detection (aspenkit/aspens#6) ---
+// Scoped to the tools actually in use across our own repos (Alembic, Drizzle)
+// rather than the full list in the upstream issue — extend if/when a repo
+// starts using another one.
+
+function detectDatabaseTools(repoPath) {
+  const detected = [];
+
+  if (existsSync(join(repoPath, 'alembic.ini'))) detected.push('alembic');
+
+  if (
+    existsSync(join(repoPath, 'drizzle.config.ts')) ||
+    existsSync(join(repoPath, 'drizzle.config.js')) ||
+    existsSync(join(repoPath, 'drizzle'))
+  ) {
+    detected.push('drizzle');
+  }
+
+  return detected;
+}
+
+// --- API Spec Detection (aspenkit/aspens#7) ---
+
+function detectAPISpecs(repoPath) {
+  const detected = [];
+
+  const openapiNames = ['openapi.yaml', 'openapi.json', 'swagger.yaml', 'swagger.json'];
+  const openapiDirs = ['', 'api', 'docs'];
+  const hasOpenapi = openapiDirs.some(dir => openapiNames.some(name => existsSync(join(repoPath, dir, name))));
+  if (hasOpenapi) detected.push('openapi');
+
+  if (hasFileWithExtension(repoPath, '.graphql', 3) || hasFileWithExtension(repoPath, '.gql', 3)) {
+    detected.push('graphql');
+  }
+
+  if (hasFileWithExtension(repoPath, '.proto', 4)) {
+    detected.push('protobuf');
+  }
+
+  if (existsSync(join(repoPath, 'asyncapi.yaml')) || existsSync(join(repoPath, 'asyncapi.json'))) {
+    detected.push('asyncapi');
+  }
+
+  return detected;
+}
+
+// Shallow recursive check for any file with the given extension.
+function hasFileWithExtension(rootPath, ext, maxDepth, depth = 0) {
+  if (depth >= maxDepth) return false;
+  for (const entry of listDir(rootPath)) {
+    if (entry.startsWith('.') || entry === 'node_modules') continue;
+    if (entry.endsWith(ext)) return true;
+    const full = join(rootPath, entry);
+    if (isDir(full) && hasFileWithExtension(full, ext, maxDepth, depth + 1)) return true;
+  }
+  return false;
+}
+
+// --- Next.js Architecture Probing (aspenkit/aspens#8) ---
+
+function findDir(repoPath, candidates) {
+  for (const candidate of candidates) {
+    const full = join(repoPath, candidate);
+    if (isDir(full)) return full;
+  }
+  return null;
+}
+
+function probeNextjsArchitecture(repoPath) {
+  const result = {
+    router: null,
+    routes: 0,
+    apiRoutes: 0,
+    serverComponents: 0,
+    clientComponents: 0,
+    hasMiddleware: false,
+  };
+
+  const appDir = findDir(repoPath, ['app', 'src/app']);
+  const pagesDir = findDir(repoPath, ['pages', 'src/pages']);
+  const appHasLayout = appDir && (existsSync(join(appDir, 'layout.tsx')) || existsSync(join(appDir, 'layout.js')));
+
+  if (appHasLayout) {
+    result.router = pagesDir ? 'both' : 'app';
+    walkAppDir(appDir, result);
+  } else if (pagesDir) {
+    result.router = 'pages';
+    countPagesRoutes(pagesDir, result);
+  }
+
+  result.hasMiddleware = existsSync(join(repoPath, 'middleware.ts')) || existsSync(join(repoPath, 'middleware.js'));
+
+  return result;
+}
+
+function walkAppDir(dir, result, depth = 0) {
+  if (depth > 12) return; // guard against pathological nesting
+  for (const entry of listDir(dir)) {
+    if (entry.startsWith('.') || entry === 'node_modules') continue;
+    const full = join(dir, entry);
+
+    if (isDir(full)) {
+      walkAppDir(full, result, depth + 1);
+      continue;
+    }
+
+    if (entry === 'page.tsx' || entry === 'page.js') {
+      result.routes++;
+    } else if (entry === 'route.ts' || entry === 'route.js') {
+      result.apiRoutes++;
+    }
+
+    const ext = extname(entry);
+    if (ext === '.tsx' || ext === '.jsx') {
+      const firstLine = readFirstLine(full);
+      if (firstLine && /^['"]use client['"]/.test(firstLine)) {
+        result.clientComponents++;
+      } else if (entry === 'page.tsx' || entry === 'page.js' || entry === 'layout.tsx' || entry === 'layout.js') {
+        result.serverComponents++;
+      }
+    }
+  }
+}
+
+function countPagesRoutes(dir, result, isApiDir = false) {
+  for (const entry of listDir(dir)) {
+    if (entry.startsWith('.') || entry === 'node_modules') continue;
+    if (entry.startsWith('_')) continue; // _app, _document, _error
+    const full = join(dir, entry);
+
+    if (isDir(full)) {
+      countPagesRoutes(full, result, isApiDir || entry === 'api');
+      continue;
+    }
+
+    const ext = extname(entry);
+    if (!SOURCE_EXTS.has(ext)) continue;
+    if (isApiDir) {
+      result.apiRoutes++;
+    } else {
+      result.routes++;
+    }
+  }
+}
+
+function readFirstLine(filePath) {
+  try {
+    const content = readFileSync(filePath, 'utf8');
+    return content.split('\n')[0].trim();
+  } catch {
+    return null;
+  }
 }
 
 // --- Structure Detection ---

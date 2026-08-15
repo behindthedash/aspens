@@ -1,6 +1,6 @@
 Generate the root project instructions file at `{{instructionsFile}}`. Keep it concise since it is loaded frequently.
 
-{{preservation-contract}}
+{{preservation-contract-refresh}}
 
 ## Your task
 

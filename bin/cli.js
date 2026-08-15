@@ -166,6 +166,7 @@ doc
   .option('--no-graph', 'Skip import graph analysis')
   .option('--target <target>', 'Output target: claude, codex, opencode')
   .option('--backend <backend>', 'Generation backend: claude, codex, opencode (default: matches target)')
+  .option('--yes', 'Answer yes to write/hook confirmation prompts (for CI/scripted use)')
   .action(docInitCommand);
 
 doc

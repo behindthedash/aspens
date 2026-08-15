@@ -45,6 +45,32 @@ export async function scanCommand(path, options) {
     console.log(pc.cyan('  Frameworks: ') + result.frameworks.join(', '));
   }
 
+  if (result.cicd && result.cicd.length > 0) {
+    console.log(pc.cyan('  CI/CD: ') + result.cicd.join(', '));
+  }
+
+  if (result.database && result.database.length > 0) {
+    console.log(pc.cyan('  Database: ') + result.database.join(', '));
+  }
+
+  if (result.apiSpecs && result.apiSpecs.length > 0) {
+    console.log(pc.cyan('  API specs: ') + result.apiSpecs.join(', '));
+  }
+
+  if (result.nextjsArchitecture) {
+    const a = result.nextjsArchitecture;
+    const routerLabel = a.router === 'app' ? 'App Router'
+      : a.router === 'pages' ? 'Pages Router'
+      : a.router === 'both' ? 'App + Pages Router (migration in progress)'
+      : null;
+    if (routerLabel) {
+      const parts = [`${a.routes} routes`, `${a.apiRoutes} API endpoints`];
+      if (a.router !== 'pages') parts.push(`${a.serverComponents} server / ${a.clientComponents} client components`);
+      if (a.hasMiddleware) parts.push('middleware');
+      console.log(pc.cyan('  Next.js: ') + routerLabel + pc.dim(' — ') + parts.join(', '));
+    }
+  }
+
   if (result.entryPoints.length > 0) {
     console.log(pc.cyan('  Entry points: ') + result.entryPoints.join(', '));
   }

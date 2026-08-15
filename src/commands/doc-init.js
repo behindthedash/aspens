@@ -15,7 +15,7 @@ import { TARGETS, resolveTarget, getAllowedPaths, writeConfig, loadConfig, merge
 import { detectAvailableBackends, resolveBackend } from '../lib/backend.js';
 import { transformForTarget, validateTransformedFiles, ensureRootKeyFilesSection, syncSkillsSection, syncBehaviorSection } from '../lib/target-transform.js';
 import { findSkillFiles } from '../lib/skill-reader.js';
-import { getGitRoot } from '../lib/git-helpers.js';
+import { getGitRoot, getGitCommonDir } from '../lib/git-helpers.js';
 import { installSaveTokensRecommended } from './save-tokens.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -73,6 +73,22 @@ function parseLLMOutput(text, allowedPaths, expectedPath) {
     files = [{ path: expectedPath, content: text.trim() + '\n' }];
   }
   return files;
+}
+
+// A root instructions file's real content always has at least one markdown
+// heading. A model that second-guesses itself mid-generation and writes a
+// clarifying question instead (e.g. "I'd rather confirm than guess... let me
+// know") still gets wrapped in valid <file> tags, so parseLLMOutput accepts
+// it — this catches that case so it retries instead of being written as-is.
+export function looksLikeConversationalNonAnswer(content) {
+  const trimmed = (content || '').trim();
+  if (!trimmed) return true;
+  // Check only the first line: a deterministically-injected `## Skills`
+  // section further down would otherwise mask conversational text that
+  // precedes it, since that section is always appended regardless of what
+  // the model wrote (see doc-init-claudemd.md's own instructions).
+  const firstLine = trimmed.split('\n')[0];
+  return !/^#{1,6}\s/.test(firstLine);
 }
 
 // Canonical (Claude) vars for prompts — generation always uses Claude format.
@@ -137,7 +153,7 @@ function validateGeneratedChunk(files, repoPath) {
   return files;
 }
 
-function buildOutputFilesForTargets(canonicalFiles, targets, scan, graphSerialized, repoPath) {
+export function buildOutputFilesForTargets(canonicalFiles, targets, scan, graphSerialized, repoPath) {
   let outputFiles = [...canonicalFiles];
   const nonClaudeTargets = targets.filter(target => target.id !== 'claude');
 
@@ -409,7 +425,7 @@ export async function docInitCommand(path, options) {
   const hasClaudeDocs = scan.hasClaudeConfig || scan.hasClaudeMd;
   const hasCodexDocs = scan.hasAgentsMd;
   const hasExistingDocs = hasClaudeDocs || hasCodexDocs;
-  _reuseSourceTarget = chooseReuseSourceTarget(targets, hasClaudeDocs, hasCodexDocs);
+  _reuseSourceTarget = chooseReuseSourceTarget(targets, hasClaudeDocs, hasCodexDocs, repoPath);
   let skipDiscovery = false;
   if (hasExistingDocs && !isBaseOnly && !isDomainsOnly && options.strategy !== 'rewrite') {
     if (recommended) {
@@ -683,7 +699,7 @@ export async function docInitCommand(path, options) {
     p.log.info(pc.dim(`Using existing ${_reuseSourceTarget.label} docs as improvement context.`));
   }
 
-  if (shouldWriteIncrementally) {
+  if (shouldWriteIncrementally && !options.yes) {
     console.log();
     const allowIncrementalWrite = await p.confirm({
       message: 'Allow aspens to write generated files incrementally during chunked generation? This includes skills, repo docs, and supported hook/config updates.',
@@ -781,14 +797,16 @@ export async function docInitCommand(path, options) {
     }
 
     // Confirm
-    const proceed = await p.confirm({
-      message: `Write ${allFiles.length} files to ${repoPath}?`,
-      initialValue: true,
-    });
+    if (!options.yes) {
+      const proceed = await p.confirm({
+        message: `Write ${allFiles.length} files to ${repoPath}?`,
+        initialValue: true,
+      });
 
-    if (p.isCancel(proceed) || !proceed) {
-      p.cancel('Aborted');
-      return;
+      if (p.isCancel(proceed) || !proceed) {
+        p.cancel('Aborted');
+        return;
+      }
     }
 
     // Step 8: Write files
@@ -839,7 +857,7 @@ export async function docInitCommand(path, options) {
 
     const gitRoot = getGitRoot(repoPath);
     if (gitRoot && options.hook !== false) {
-      const hookPath = join(gitRoot, '.git', 'hooks', 'post-commit');
+      const hookPath = join(getGitCommonDir(repoPath) || join(gitRoot, '.git'), 'hooks', 'post-commit');
       const hookInstalled = existsSync(hookPath) &&
         readFileSync(hookPath, 'utf8').includes(`aspens doc-sync hook (${toPosixRelative(gitRoot, repoPath) || '.'})`);
       if (!hookInstalled) {
@@ -870,7 +888,7 @@ export async function docInitCommand(path, options) {
   // Offer auto-sync git hook (works for all targets — runs `aspens doc sync` on commit)
   const gitRoot = getGitRoot(repoPath);
   if (!recommended && options.hook !== false && !options.dryRun && gitRoot) {
-    const hookPath = join(gitRoot, '.git', 'hooks', 'post-commit');
+    const hookPath = join(getGitCommonDir(repoPath) || join(gitRoot, '.git'), 'hooks', 'post-commit');
     const hookInstalled = existsSync(hookPath) &&
       readFileSync(hookPath, 'utf8').includes(`aspens doc-sync hook (${toPosixRelative(gitRoot, repoPath) || '.'})`);
     if (!hookInstalled) {
@@ -1278,9 +1296,40 @@ function buildStrategyInstruction(strategy) {
   return '';
 }
 
-function chooseReuseSourceTarget(targets, hasClaudeDocs, hasCodexDocs) {
+// A bare single-line `@<path>` import (the standard convention for pointing
+// CLAUDE.md/AGENTS.md at each other, e.g. `@AGENTS.md`) carries none of its
+// own content — treating it as substantive "existing docs" starves the
+// improve-strategy prompt of the real content, which lives in the file it
+// points to.
+export function isTrivialImportStub(content) {
+  const trimmed = (content || '').trim();
+  return trimmed === '' || /^@\S+$/.test(trimmed);
+}
+
+export function targetHasSubstantiveInstructions(repoPath, target) {
+  if (!target?.instructionsFile) return false;
+  const path = join(repoPath, target.instructionsFile);
+  if (!existsSync(path)) return false;
+  try {
+    return !isTrivialImportStub(readFileSync(path, 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+export function chooseReuseSourceTarget(targets, hasClaudeDocs, hasCodexDocs, repoPath) {
   const wantsClaude = targets.some(t => t.id === 'claude');
   const wantsCodex = targets.some(t => t.id === 'codex');
+
+  // When both formats exist, prefer whichever one actually has real content
+  // to reuse — a stub import pointing at the other format's file is not
+  // "existing docs" worth basing generation on.
+  if (hasClaudeDocs && hasCodexDocs && repoPath) {
+    const claudeSubstantive = targetHasSubstantiveInstructions(repoPath, TARGETS.claude);
+    const codexSubstantive = targetHasSubstantiveInstructions(repoPath, TARGETS.codex);
+    if (claudeSubstantive && !codexSubstantive) return TARGETS.claude;
+    if (codexSubstantive && !claudeSubstantive) return TARGETS.codex;
+  }
 
   if (hasClaudeDocs && !hasCodexDocs) return TARGETS.claude;
   if (hasCodexDocs && !hasClaudeDocs) return TARGETS.codex;
@@ -1709,26 +1758,35 @@ async function generateChunked(repoPath, scan, repoGraph, domains, baseOnly, tim
     }
 
     const rootGraphContext = buildRootInstructionsGraphContext(repoGraph);
-    const claudeMdPrompt = loadPrompt('doc-init-claudemd', CANONICAL_VARS) +
+    const claudeMdPrompt = loadPrompt('doc-init-claudemd', CANONICAL_VARS) + strategyNote +
       `\n\n---\n\nRepository path: ${repoPath}\n\n## Scan Results\nRepo: ${scan.name} (${scan.repoType})\nLanguages: ${scan.languages.join(', ')}\nFrameworks: ${scan.frameworks.join(', ')}\nEntry points: ${scan.entryPoints.join(', ')}\n\n## Generated Skills\n${skillSummaries}${rootGraphContext ? `\n\n${rootGraphContext}` : ''}${existingClaudeMdSection}`;
 
     try {
       let { text, usage } = await runLLM(claudeMdPrompt, makeClaudeOptions(timeoutMs, verbose, model, claudeMdSpinner), _backendId);
       trackUsage(usage, claudeMdPrompt.length);
       let files = parseLLMOutput(text, _allowedPaths, 'CLAUDE.md');
+      let isConversational = files.length > 0 && looksLikeConversationalNonAnswer(files[0].content);
 
-      // Retry up to 2 times if LLM didn't produce parseable output
+      // Retry up to 2 times if the LLM didn't produce parseable output, or
+      // produced a conversational non-answer instead of real content.
       const MAX_RETRIES = 2;
-      for (let attempt = 0; attempt < MAX_RETRIES && files.length === 0; attempt++) {
-        claudeMdSpinner.message(`${instructionsArtifactLabel()} missing file tags — retry ${attempt + 1}/${MAX_RETRIES}...`);
-        const retryPrompt = `Your previous response did not include the required <file path="CLAUDE.md">content</file> XML tags. I need you to output CLAUDE.md wrapped in exactly this format:\n\n<file path="CLAUDE.md">\n# project-name\n[CLAUDE.md content]\n</file>\n\nHere is your previous output — please re-wrap it correctly:\n\n${text}`;
+      for (let attempt = 0; attempt < MAX_RETRIES && (files.length === 0 || isConversational); attempt++) {
+        const retryPrompt = isConversational
+          ? `Your previous response asked a clarifying question or hedged instead of generating the file. Do not ask questions — make your best judgment call and output the complete file now, wrapped in <file path="CLAUDE.md">...</file> tags, starting with a markdown heading. Your previous (invalid) response was:\n\n${text}`
+          : `Your previous response did not include the required <file path="...">content</file> XML tags. I need you to output CLAUDE.md wrapped in exactly this format:\n\n<file path="CLAUDE.md">\n# project-name\n[CLAUDE.md content]\n</file>\n\nHere is your previous output — please re-wrap it correctly:\n\n${text}`;
+        claudeMdSpinner.message(
+          isConversational
+            ? `${instructionsArtifactLabel()} looked like a question, not content — retry ${attempt + 1}/${MAX_RETRIES}...`
+            : `${instructionsArtifactLabel()} missing file tags — retry ${attempt + 1}/${MAX_RETRIES}...`
+        );
         const retry = await runLLM(retryPrompt, makeClaudeOptions(timeoutMs, verbose, model, null), _backendId);
         trackUsage(retry.usage, retryPrompt.length);
         files = parseLLMOutput(retry.text, _allowedPaths, 'CLAUDE.md');
+        isConversational = files.length > 0 && looksLikeConversationalNonAnswer(files[0].content);
         text = retry.text;
       }
 
-      if (files.length === 0) {
+      if (files.length === 0 || isConversational) {
         claudeMdSpinner.stop(pc.yellow(`${instructionsArtifactLabel()} — failed after retries`));
         p.log.warn(`Could not generate ${instructionsArtifactLabel()}. Try: aspens doc init --strategy rewrite --mode base-only`);
       } else {

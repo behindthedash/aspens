@@ -160,3 +160,34 @@ describe.sequential('removeGitHook', () => {
     expect(content).toContain('# >>> aspens doc-sync hook (frontend) (do not edit) >>>');
   });
 });
+
+describe.sequential('installGitHook in a linked worktree', () => {
+  const WORKTREE_DIR = join(TEST_DIR, '..', 'tmp-hook-worktree');
+
+  beforeEach(() => {
+    if (existsSync(WORKTREE_DIR)) rmSync(WORKTREE_DIR, { recursive: true, force: true });
+    // A repo needs a commit before `git worktree add` can check out a branch.
+    writeFileSync(join(TEST_DIR, 'README.md'), 'test\n', 'utf8');
+    execFileSync('git', ['add', 'README.md'], { cwd: TEST_DIR, stdio: 'pipe' });
+    execFileSync('git', ['-c', 'user.email=a@b.c', '-c', 'user.name=a', 'commit', '-m', 'init'], {
+      cwd: TEST_DIR,
+      stdio: 'pipe',
+    });
+    execFileSync('git', ['worktree', 'add', WORKTREE_DIR, '-b', 'wt-branch'], {
+      cwd: TEST_DIR,
+      stdio: 'pipe',
+    });
+  });
+
+  afterAll(() => {
+    if (existsSync(WORKTREE_DIR)) rmSync(WORKTREE_DIR, { recursive: true, force: true });
+  });
+
+  it('installs into the shared common dir instead of crashing on a worktree`s `.git` file', () => {
+    // Before the fix this threw `ENOTDIR: not a directory, mkdir '<worktree>/.git/hooks'`
+    // because a linked worktree's `.git` is a file, not a directory.
+    expect(() => installGitHook(WORKTREE_DIR)).not.toThrow();
+    const content = readFileSync(HOOK_PATH, 'utf8');
+    expect(content).toContain('# >>> aspens doc-sync hook (.) (do not edit) >>>');
+  });
+});

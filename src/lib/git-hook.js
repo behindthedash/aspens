@@ -3,7 +3,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, chmodSy
 import { execSync } from 'child_process';
 import pc from 'picocolors';
 import { CliError } from './errors.js';
-import { getGitRoot } from './git-helpers.js';
+import { getGitRoot, getGitCommonDir } from './git-helpers.js';
 
 function resolveAspensPath() {
   const cmd = process.platform === 'win32' ? 'where aspens' : 'which aspens';
@@ -33,7 +33,11 @@ export function installGitHook(repoPath) {
   const projectPathExpr = projectRelative ? `"\${REPO_ROOT}/${projectRelative}"` : '"${REPO_ROOT}"';
   const scopePrefix = projectRelative ? `grep '^${escapeForSingleQuotes(projectRelative)}/' | ` : '';
 
-  const hookDir = join(gitRoot, '.git', 'hooks');
+  // A linked worktree's `.git` is a FILE (a gitdir pointer), not a
+  // directory — hooks live in the common dir shared by every worktree, not
+  // under the worktree's own root.
+  const gitCommonDir = getGitCommonDir(repoPath) || join(gitRoot, '.git');
+  const hookDir = join(gitCommonDir, 'hooks');
   const hookPath = join(hookDir, 'post-commit');
   mkdirSync(hookDir, { recursive: true });
 

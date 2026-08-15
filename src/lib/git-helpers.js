@@ -1,4 +1,5 @@
 import { execFileSync } from 'child_process';
+import { isAbsolute, resolve as resolvePath } from 'path';
 
 export function getGitRoot(repoPath) {
   try {
@@ -15,6 +16,27 @@ export function getGitRoot(repoPath) {
 
 export function isGitRepo(repoPath) {
   return !!getGitRoot(repoPath);
+}
+
+// The directory hooks actually live in — shared by every linked worktree.
+// In a plain checkout this is `<root>/.git`; in a linked worktree `.git` at
+// the worktree root is a FILE (a gitdir pointer), not a directory, so hooks
+// must be installed at the common dir instead or mkdir'ing `.git/hooks`
+// fails with ENOTDIR.
+export function getGitCommonDir(repoPath) {
+  try {
+    const raw = execFileSync('git', ['rev-parse', '--git-common-dir'], {
+      cwd: repoPath,
+      encoding: 'utf8',
+      stdio: 'pipe',
+      timeout: 5000,
+    }).trim();
+    if (!raw) return null;
+    // Relative output is relative to repoPath (git's own contract for this flag).
+    return isAbsolute(raw) ? raw : resolvePath(repoPath, raw);
+  } catch {
+    return null;
+  }
 }
 
 export function getGitDiff(repoPath, commits) {
