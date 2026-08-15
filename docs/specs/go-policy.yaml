@@ -1,0 +1,4 @@
+# Worktrail /go policy for aspens.
+# pre_pr_cmd mirrors the CI test job (.github/workflows/ci.yml) so the
+# mandatory pre-PR gate reflects the same signal CI will check.
+pre_pr_cmd: "npm test"
