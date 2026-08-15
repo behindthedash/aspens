@@ -81,12 +81,12 @@ describe('resolveBackend', () => {
   });
 
   describe('nothing available', () => {
-    it('throws with install message when neither backend available', () => {
+    it('throws with install message when no backend available', () => {
       expect(() =>
         resolveBackend({
-          available: { claude: false, codex: false },
+          available: { claude: false, codex: false, opencode: false },
         })
-      ).toThrow('aspens requires either Claude CLI or Codex CLI');
+      ).toThrow('aspens requires Claude CLI, Codex CLI, or OpenCode CLI');
     });
 
     it('throws with install URLs', () => {

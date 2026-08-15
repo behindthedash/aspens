@@ -229,11 +229,13 @@ export async function docInitCommand(path, options) {
 
   // --- Step 0: Detect available backends ---
   const available = detectAvailableBackends();
-  if (!available.claude && !available.codex) {
+  if (!available.claude && !available.codex && !available.opencode) {
+    const installLines = [];
+    for (const backend of Object.values(BACKENDS)) {
+      installLines.push(`  Install ${backend.label}: ${backend.installUrl}`);
+    }
     throw new CliError(
-      'aspens requires either Claude CLI or Codex CLI.\n' +
-      '  Install Claude CLI: https://docs.anthropic.com/claude-code\n' +
-      '  Install Codex CLI: https://github.com/openai/codex'
+      'aspens requires Claude CLI, Codex CLI, or OpenCode CLI.\n' + installLines.join('\n')
     );
   }
 
@@ -257,15 +259,22 @@ export async function docInitCommand(path, options) {
     backendResult = resolveBackend({ backendFlag: recommendedBackendId, available });
   } else if (recommended && recommendedTargetIds?.length === 1) {
     backendResult = resolveBackend({ targetId: recommendedTargetIds[0], available });
-  } else if (available.claude && available.codex && !recommended) {
-    const backendChoice = await p.select({
-      message: 'Which AI should generate the docs?',
-      options: [
-        { value: 'claude', label: 'Claude CLI', hint: 'uses your Anthropic subscription' },
-        { value: 'codex', label: 'Codex CLI', hint: 'uses your OpenAI subscription' },
-      ],
-    });
-    if (p.isCancel(backendChoice)) { p.cancel('Aborted'); return; }
+  } else if (!recommended) {
+    const availableBackends = Object.keys(available).filter(id => available[id]);
+    let backendChoice;
+    if (availableBackends.length > 1) {
+      backendChoice = await p.select({
+        message: 'Which AI should generate the docs?',
+        options: availableBackends.map(id => ({
+          value: id,
+          label: BACKENDS[id].label,
+          hint: `uses ${BACKENDS[id].label}`,
+        })),
+      });
+      if (p.isCancel(backendChoice)) { p.cancel('Aborted'); return; }
+    } else {
+      backendChoice = availableBackends[0];
+    }
     backendResult = resolveBackend({ backendFlag: backendChoice, available });
   } else {
     // Only one available — use it
@@ -278,28 +287,50 @@ export async function docInitCommand(path, options) {
   // --- Step 2: Target selection (what to generate FOR) ---
   let targetIds;
   if (options.target) {
-    targetIds = options.target === 'all' ? ['claude', 'codex'] : [options.target];
+    targetIds = options.target === 'all' ? Object.keys(TARGETS) : [options.target];
   } else if (recommendedTargetIds?.length) {
     targetIds = recommendedTargetIds;
   } else if (recommended) {
     targetIds = [backend.id];
-  } else if (available.claude && available.codex) {
-    const selected = await p.multiselect({
-      message: 'Generate docs for which coding agents?',
-      options: [
-        { value: 'claude', label: 'Claude Code', hint: 'CLAUDE.md + .claude/skills/ + hooks' },
-        { value: 'codex', label: 'Codex CLI', hint: 'AGENTS.md + .agents/skills/' },
-      ],
-      initialValues: [backend.id], // pre-select matching target
-      required: true,
-    });
-    if (p.isCancel(selected)) { p.cancel('Aborted'); return; }
-    targetIds = selected;
   } else {
-    // Only one CLI — generate for matching target
-    targetIds = [available.claude ? 'claude' : 'codex'];
+    const availableTargetIds = Object.keys(TARGETS).filter(id => available[id]);
+    if (availableTargetIds.length > 1) {
+      const selected = await p.multiselect({
+        message: 'Generate docs for which coding agents?',
+        options: availableTargetIds.map(id => ({
+          value: id,
+          label: TARGETS[id].label,
+        })),
+        initialValues: [backend.id], // pre-select matching target
+        required: true,
+      });
+      if (p.isCancel(selected)) { p.cancel('Aborted'); return; }
+      targetIds = selected;
+    } else {
+      // Only one CLI — generate for matching target
+      targetIds = [backend.id];
+    }
   }
   const targets = targetIds.map(id => resolveTarget(id));
+
+  // codex and opencode both write their root instructions file to AGENTS.md
+  // but via different transforms (codex: directory-scoped restructure,
+  // opencode: centralized copy of CLAUDE.md) — combining them silently
+  // clobbers whichever one is written last. Reject the combination instead
+  // of guessing at ownership.
+  const instructionsFileOwners = new Map();
+  for (const target of targets) {
+    const owners = instructionsFileOwners.get(target.instructionsFile) || [];
+    owners.push(target);
+    instructionsFileOwners.set(target.instructionsFile, owners);
+  }
+  for (const [file, owners] of instructionsFileOwners) {
+    if (owners.length > 1) {
+      throw new CliError(
+        `Cannot generate for ${owners.map(t => t.label).join(' + ')} together — both write ${file} with different content. Run \`aspens doc init --target <one>\` separately for each.`
+      );
+    }
+  }
   const primaryTarget = targets[0];
   _primaryTarget = primaryTarget;
   _allowedPaths = null; // canonical generation uses defaults
