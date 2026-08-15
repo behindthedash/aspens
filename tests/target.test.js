@@ -50,12 +50,13 @@ describe('resolveTarget', () => {
 });
 
 describe('resolveTargets', () => {
-  it('returns both targets for "all"', () => {
+  it('returns all targets for "all"', () => {
     const targets = resolveTargets('all');
-    expect(targets).toHaveLength(2);
+    expect(targets).toHaveLength(3);
     const ids = targets.map(t => t.id);
     expect(ids).toContain('claude');
     expect(ids).toContain('codex');
+    expect(ids).toContain('opencode');
   });
 
   it('returns array with claude only for "claude"', () => {

@@ -158,6 +158,15 @@ export function runLLM(prompt, options = {}, backendId = 'claude') {
       cwd: options.cwd,
     });
   }
+  if (backendId === 'opencode') {
+    return runOpenCode(prompt, {
+      timeout: options.timeout,
+      verbose: options.verbose,
+      onActivity: options.onActivity,
+      model: options.model,
+      cwd: options.cwd,
+    });
+  }
   return runClaude(prompt, options);
 }
 
@@ -266,6 +275,115 @@ export function runCodex(prompt, options = {}) {
     } else {
       child.stdin.end();
     }
+  });
+}
+
+/**
+ * Execute a prompt via OpenCode CLI (opencode run).
+ * Uses --format json for structured event output.
+ * Returns { text, usage } matching runClaude's interface.
+ */
+export function runOpenCode(prompt, options = {}) {
+  const { timeout = 300000, verbose = false, onActivity = null, model = null, cwd = null } = options;
+
+  // Write prompt to temp file for long prompts
+  const promptFile = join(tmpdir(), `aspens-opencode-prompt-${Date.now()}.md`);
+  writeFileSync(promptFile, prompt, 'utf8');
+
+  const args = [
+    'run',
+    '--format', 'json',
+    '--dangerously-skip-permissions',
+    '-f', promptFile,
+    'Generate repo documentation based on the attached prompt file',
+  ];
+  if (model) args.push('--model', model);
+  if (cwd) args.push('--dir', cwd);
+
+  return new Promise((resolve, reject) => {
+    const child = spawn('opencode', args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      shell: process.platform === 'win32',
+    });
+
+    const chunks = [];
+    const errChunks = [];
+    let textParts = [];
+    let usage = { output_tokens: 0, tool_uses: 0, tool_result_chars: 0 };
+
+    child.stdout.on('data', (data) => {
+      chunks.push(data);
+      // Parse JSON events for text content
+      const text = data.toString('utf8');
+      for (const line of text.split('\n').filter(l => l.trim())) {
+        try {
+          const event = JSON.parse(line);
+          const content = event.content;
+          if (content && typeof content === 'string') {
+            textParts.push(content);
+          } else if (content && Array.isArray(content)) {
+            for (const part of content) {
+              if (typeof part?.text === 'string') {
+                textParts.push(part.text);
+              } else if (typeof part?.content === 'string') {
+                textParts.push(part.content);
+              }
+            }
+          }
+          if (event.type === 'message_complete' || event.type === 'message_turn_complete') {
+            if (event.usage) {
+              usage.output_tokens = event.usage.output_tokens || event.usage.outputTokens || 0;
+            }
+          }
+          if (verbose && onActivity) {
+            if (event.type === 'step_start') {
+              onActivity('OpenCode thinking...');
+            }
+          }
+        } catch { /* not JSON */ }
+      }
+    });
+
+    child.stderr.on('data', (data) => errChunks.push(data));
+
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      if (process.platform === 'win32' && child.pid) {
+        try { execSync(`taskkill /pid ${child.pid} /t /f`, { stdio: 'ignore' }); } catch { /* ignore */ }
+      } else {
+        child.kill('SIGTERM');
+      }
+    }, timeout);
+
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      try { execSync(`rm -f "${promptFile}"`, { stdio: 'ignore' }); } catch { /* ignore */ }
+
+      if (timedOut || signal === 'SIGTERM' || signal === 'SIGKILL') {
+        reject(new Error(`OpenCode timed out after ${timeout / 1000}s. Try a smaller repo or increase --timeout.`));
+      } else if (code === 0) {
+        const combined = textParts.join('\n').trim();
+        if (!combined && chunks.length > 0) {
+          // Fallback: try to extract from raw output
+          const raw = Buffer.concat(chunks).toString('utf8');
+          resolve({ text: raw, usage });
+        } else {
+          resolve({ text: combined, usage });
+        }
+      } else if (code === 127) {
+        reject(new Error('OpenCode CLI not found. Install it first: https://opencode.ai'));
+      } else {
+        const stderr = Buffer.concat(errChunks).toString('utf8');
+        reject(new Error(`OpenCode exited with code ${code}${stderr ? ': ' + stderr.slice(0, 500) : ''}`));
+      }
+    });
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      try { execSync(`rm -f "${promptFile}"`, { stdio: 'ignore' }); } catch { /* ignore */ }
+      reject(new Error(`OpenCode failed to start: ${err.message}. Is OpenCode CLI installed?`));
+    });
   });
 }
 

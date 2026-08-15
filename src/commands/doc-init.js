@@ -229,11 +229,13 @@ export async function docInitCommand(path, options) {
 
   // --- Step 0: Detect available backends ---
   const available = detectAvailableBackends();
-  if (!available.claude && !available.codex) {
+  if (!available.claude && !available.codex && !available.opencode) {
+    const installLines = [];
+    for (const backend of Object.values(BACKENDS)) {
+      installLines.push(`  Install ${backend.label}: ${backend.installUrl}`);
+    }
     throw new CliError(
-      'aspens requires either Claude CLI or Codex CLI.\n' +
-      '  Install Claude CLI: https://docs.anthropic.com/claude-code\n' +
-      '  Install Codex CLI: https://github.com/openai/codex'
+      'aspens requires Claude CLI, Codex CLI, or OpenCode CLI.\n' + installLines.join('\n')
     );
   }
 
@@ -257,15 +259,22 @@ export async function docInitCommand(path, options) {
     backendResult = resolveBackend({ backendFlag: recommendedBackendId, available });
   } else if (recommended && recommendedTargetIds?.length === 1) {
     backendResult = resolveBackend({ targetId: recommendedTargetIds[0], available });
-  } else if (available.claude && available.codex && !recommended) {
-    const backendChoice = await p.select({
-      message: 'Which AI should generate the docs?',
-      options: [
-        { value: 'claude', label: 'Claude CLI', hint: 'uses your Anthropic subscription' },
-        { value: 'codex', label: 'Codex CLI', hint: 'uses your OpenAI subscription' },
-      ],
-    });
-    if (p.isCancel(backendChoice)) { p.cancel('Aborted'); return; }
+  } else if (!recommended) {
+    const availableBackends = Object.keys(available).filter(id => available[id]);
+    let backendChoice;
+    if (availableBackends.length > 1) {
+      backendChoice = await p.select({
+        message: 'Which AI should generate the docs?',
+        options: availableBackends.map(id => ({
+          value: id,
+          label: BACKENDS[id].label,
+          hint: `uses ${BACKENDS[id].label}`,
+        })),
+      });
+      if (p.isCancel(backendChoice)) { p.cancel('Aborted'); return; }
+    } else {
+      backendChoice = availableBackends[0];
+    }
     backendResult = resolveBackend({ backendFlag: backendChoice, available });
   } else {
     // Only one available — use it
@@ -278,7 +287,7 @@ export async function docInitCommand(path, options) {
   // --- Step 2: Target selection (what to generate FOR) ---
   let targetIds;
   if (options.target) {
-    targetIds = options.target === 'all' ? ['claude', 'codex'] : [options.target];
+    targetIds = options.target === 'all' ? Object.keys(TARGETS) : [options.target];
   } else if (recommendedTargetIds?.length) {
     targetIds = recommendedTargetIds;
   } else if (recommended) {
