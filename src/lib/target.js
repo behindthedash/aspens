@@ -284,9 +284,21 @@ export function inferConfig(repoPath) {
     hasCodexSkills ||
     (hasCodexInstructions && (hasCodexConfig || hasCodexSkills));
 
+  // OpenCode shares codex's instructionsFile (AGENTS.md) and claude's
+  // skillsDir (.claude/skills), so it only counts as present when AGENTS.md
+  // exists WITHOUT any codex-specific artifact (.codex/ or .agents/skills) —
+  // otherwise an AGENTS.md + .claude/skills repo is ambiguous with a
+  // Claude-only repo and is left to hasClaudeArtifacts instead.
+  const hasOpenCodeArtifacts =
+    hasClaudeArtifacts &&
+    hasCodexInstructions &&
+    !hasCodexConfig &&
+    !hasCodexSkills;
+
   const targets = [];
   if (hasClaudeArtifacts) targets.push('claude');
   if (hasCodexArtifacts) targets.push('codex');
+  if (hasOpenCodeArtifacts) targets.push('opencode');
 
   if (targets.length === 0) return null;
 

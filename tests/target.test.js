@@ -214,6 +214,29 @@ describe('config persistence', () => {
     expect(config.backend).toBeNull();
   });
 
+  it('infers opencode target from AGENTS.md + .claude/skills without codex artifacts', () => {
+    const dir = join(FIXTURES_DIR, 'config-infer-opencode');
+    mkdirSync(join(dir, '.claude', 'skills'), { recursive: true });
+    writeFileSync(join(dir, 'AGENTS.md'), '# docs\n', 'utf8');
+
+    const config = inferConfig(dir);
+
+    expect(config).not.toBeNull();
+    expect(config.targets).toEqual(['claude', 'opencode']);
+  });
+
+  it('does not infer opencode when real codex artifacts are present', () => {
+    const dir = join(FIXTURES_DIR, 'config-infer-codex-not-opencode');
+    mkdirSync(join(dir, '.claude', 'skills'), { recursive: true });
+    mkdirSync(join(dir, '.agents', 'skills'), { recursive: true });
+    writeFileSync(join(dir, 'AGENTS.md'), '# docs\n', 'utf8');
+
+    const config = inferConfig(dir);
+
+    expect(config.targets).toEqual(['claude', 'codex']);
+    expect(config.targets).not.toContain('opencode');
+  });
+
   it('recovers missing .aspens.json and persists inferred targets', () => {
     const dir = join(FIXTURES_DIR, 'config-recover');
     mkdirSync(join(dir, '.claude', 'skills'), { recursive: true });

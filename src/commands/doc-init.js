@@ -292,23 +292,45 @@ export async function docInitCommand(path, options) {
     targetIds = recommendedTargetIds;
   } else if (recommended) {
     targetIds = [backend.id];
-  } else if (available.claude && available.codex) {
-    const selected = await p.multiselect({
-      message: 'Generate docs for which coding agents?',
-      options: [
-        { value: 'claude', label: 'Claude Code', hint: 'CLAUDE.md + .claude/skills/ + hooks' },
-        { value: 'codex', label: 'Codex CLI', hint: 'AGENTS.md + .agents/skills/' },
-      ],
-      initialValues: [backend.id], // pre-select matching target
-      required: true,
-    });
-    if (p.isCancel(selected)) { p.cancel('Aborted'); return; }
-    targetIds = selected;
   } else {
-    // Only one CLI — generate for matching target
-    targetIds = [available.claude ? 'claude' : 'codex'];
+    const availableTargetIds = Object.keys(TARGETS).filter(id => available[id]);
+    if (availableTargetIds.length > 1) {
+      const selected = await p.multiselect({
+        message: 'Generate docs for which coding agents?',
+        options: availableTargetIds.map(id => ({
+          value: id,
+          label: TARGETS[id].label,
+        })),
+        initialValues: [backend.id], // pre-select matching target
+        required: true,
+      });
+      if (p.isCancel(selected)) { p.cancel('Aborted'); return; }
+      targetIds = selected;
+    } else {
+      // Only one CLI — generate for matching target
+      targetIds = [backend.id];
+    }
   }
   const targets = targetIds.map(id => resolveTarget(id));
+
+  // codex and opencode both write their root instructions file to AGENTS.md
+  // but via different transforms (codex: directory-scoped restructure,
+  // opencode: centralized copy of CLAUDE.md) — combining them silently
+  // clobbers whichever one is written last. Reject the combination instead
+  // of guessing at ownership.
+  const instructionsFileOwners = new Map();
+  for (const target of targets) {
+    const owners = instructionsFileOwners.get(target.instructionsFile) || [];
+    owners.push(target);
+    instructionsFileOwners.set(target.instructionsFile, owners);
+  }
+  for (const [file, owners] of instructionsFileOwners) {
+    if (owners.length > 1) {
+      throw new CliError(
+        `Cannot generate for ${owners.map(t => t.label).join(' + ')} together — both write ${file} with different content. Run \`aspens doc init --target <one>\` separately for each.`
+      );
+    }
+  }
   const primaryTarget = targets[0];
   _primaryTarget = primaryTarget;
   _allowedPaths = null; // canonical generation uses defaults

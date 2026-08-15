@@ -53,7 +53,7 @@ function showWelcome() {
     ${pc.green('aspens doc init --recommended')}     Install the full recommended setup
     ${pc.green('aspens doc init --dry-run')}         Preview without writing
     ${pc.green('aspens doc init --mode chunked')}    One domain at a time (large repos)
-    ${pc.green('aspens doc init --target all')}      Generate Claude + Codex docs together
+    ${pc.green('aspens doc init --target all')}      Generate docs for every configured target
     ${pc.green('aspens doc init --model haiku')}     Use a specific backend model
     ${pc.green('aspens doc init --verbose')}         See backend activity in real time
     ${pc.green('aspens doc sync')}                   Update generated docs from recent commits
@@ -92,6 +92,7 @@ function showWelcome() {
     ${pc.dim('Codex:   ')} ${pc.cyan('AGENTS.md + .agents/skills + directory AGENTS.md')}
     ${pc.dim('OpenCode:')} ${pc.cyan('AGENTS.md + .claude/skills')}
     ${pc.dim('Hooks are Claude-only today. Codex and OpenCode are instruction-file driven.')}
+    ${pc.dim('Codex and OpenCode both write AGENTS.md — combine each with Claude, not with each other.')}
 
   ${pc.dim('Run')} ${pc.cyan('aspens <command> --help')} ${pc.dim('for detailed usage.')}
 

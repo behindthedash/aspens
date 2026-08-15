@@ -1,5 +1,5 @@
 import { execSync, spawn } from 'child_process';
-import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, rmSync } from 'fs';
 import { join, dirname, normalize, resolve, relative, sep } from 'path';
 import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
@@ -290,58 +290,73 @@ export function runOpenCode(prompt, options = {}) {
   const promptFile = join(tmpdir(), `aspens-opencode-prompt-${Date.now()}.md`);
   writeFileSync(promptFile, prompt, 'utf8');
 
+  // The message must precede `-f` — `-f`/`--file` is a yargs array-type
+  // option, so a bare positional placed after it gets swallowed into the
+  // file array instead of being treated as the message.
   const args = [
     'run',
-    '--format', 'json',
-    '--dangerously-skip-permissions',
-    '-f', promptFile,
     'Generate repo documentation based on the attached prompt file',
+    '--format', 'json',
+    '-f', promptFile,
   ];
   if (model) args.push('--model', model);
   if (cwd) args.push('--dir', cwd);
 
+  const cleanupPromptFile = () => {
+    try { rmSync(promptFile, { force: true }); } catch { /* ignore */ }
+  };
+
   return new Promise((resolve, reject) => {
+    // Unlike runClaude/runCodex, the prompt is passed via -f (a file), not
+    // stdin — an open, never-written, never-closed stdin pipe makes
+    // `opencode run` hang indefinitely before it even starts (confirmed:
+    // `sleep 999 | opencode run ...` never gets past its init phase).
+    // 'ignore' means no stdin pipe exists at all.
     const child = spawn('opencode', args, {
-      stdio: ['pipe', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe'],
       shell: process.platform === 'win32',
     });
 
     const chunks = [];
     const errChunks = [];
-    let textParts = [];
+    // Keyed by part.id: a "text" event carries the full accumulated text
+    // for that part (not a delta), and later events for the same id replace
+    // earlier ones. Distinct part ids are separate text blocks, joined in
+    // first-seen order.
+    const textPartsById = new Map();
     let usage = { output_tokens: 0, tool_uses: 0, tool_result_chars: 0 };
+    let lineBuffer = '';
+
+    function processOpenCodeLine(line) {
+      if (!line.trim()) return;
+      try {
+        const event = JSON.parse(line);
+        const part = event.part;
+        if (event.type === 'text' && part?.type === 'text' && typeof part.text === 'string') {
+          textPartsById.set(part.id, part.text);
+        }
+        if ((event.type === 'step_finish' || event.type === 'step-finish') && part?.tokens) {
+          usage.output_tokens = part.tokens.output || 0;
+        }
+        if (event.type === 'tool' || part?.type === 'tool') {
+          usage.tool_uses++;
+        }
+        if (verbose && onActivity) {
+          if (event.type === 'step_start') {
+            onActivity('OpenCode thinking...');
+          }
+        }
+      } catch { /* not JSON */ }
+    }
 
     child.stdout.on('data', (data) => {
       chunks.push(data);
-      // Parse JSON events for text content
-      const text = data.toString('utf8');
-      for (const line of text.split('\n').filter(l => l.trim())) {
-        try {
-          const event = JSON.parse(line);
-          const content = event.content;
-          if (content && typeof content === 'string') {
-            textParts.push(content);
-          } else if (content && Array.isArray(content)) {
-            for (const part of content) {
-              if (typeof part?.text === 'string') {
-                textParts.push(part.text);
-              } else if (typeof part?.content === 'string') {
-                textParts.push(part.content);
-              }
-            }
-          }
-          if (event.type === 'message_complete' || event.type === 'message_turn_complete') {
-            if (event.usage) {
-              usage.output_tokens = event.usage.output_tokens || event.usage.outputTokens || 0;
-            }
-          }
-          if (verbose && onActivity) {
-            if (event.type === 'step_start') {
-              onActivity('OpenCode thinking...');
-            }
-          }
-        } catch { /* not JSON */ }
-      }
+      // Parse JSON events for text content — buffer across chunks since a
+      // record can span multiple `data` callbacks.
+      lineBuffer += data.toString('utf8');
+      const lines = lineBuffer.split('\n');
+      lineBuffer = lines.pop();
+      for (const line of lines) processOpenCodeLine(line);
     });
 
     child.stderr.on('data', (data) => errChunks.push(data));
@@ -358,12 +373,13 @@ export function runOpenCode(prompt, options = {}) {
 
     child.on('close', (code, signal) => {
       clearTimeout(timer);
-      try { execSync(`rm -f "${promptFile}"`, { stdio: 'ignore' }); } catch { /* ignore */ }
+      if (lineBuffer.trim()) processOpenCodeLine(lineBuffer);
+      cleanupPromptFile();
 
       if (timedOut || signal === 'SIGTERM' || signal === 'SIGKILL') {
         reject(new Error(`OpenCode timed out after ${timeout / 1000}s. Try a smaller repo or increase --timeout.`));
       } else if (code === 0) {
-        const combined = textParts.join('\n').trim();
+        const combined = [...textPartsById.values()].join('\n').trim();
         if (!combined && chunks.length > 0) {
           // Fallback: try to extract from raw output
           const raw = Buffer.concat(chunks).toString('utf8');
@@ -375,13 +391,17 @@ export function runOpenCode(prompt, options = {}) {
         reject(new Error('OpenCode CLI not found. Install it first: https://opencode.ai'));
       } else {
         const stderr = Buffer.concat(errChunks).toString('utf8');
-        reject(new Error(`OpenCode exited with code ${code}${stderr ? ': ' + stderr.slice(0, 500) : ''}`));
+        if (stderr.includes('rate limit') || stderr.includes('429')) {
+          reject(new Error('OpenCode rate limit hit. Wait a moment and try again.'));
+        } else {
+          reject(new Error(`OpenCode exited with code ${code}${stderr ? ': ' + stderr.slice(0, 500) : ''}`));
+        }
       }
     });
 
     child.on('error', (err) => {
       clearTimeout(timer);
-      try { execSync(`rm -f "${promptFile}"`, { stdio: 'ignore' }); } catch { /* ignore */ }
+      cleanupPromptFile();
       reject(new Error(`OpenCode failed to start: ${err.message}. Is OpenCode CLI installed?`));
     });
   });
