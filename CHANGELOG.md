@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.9.0] - 2026-08-15
+
+### Added
+- **OpenCode CLI support** — `opencode` is now a supported generation backend and output target across `doc init` / `doc sync` / `doc impact`. `runOpenCode()` drives `opencode run --format json` (prompt passed via a `-f` file, stdin disabled to avoid a startup hang) and adapts its event stream to the shared `{ text, usage }` runner interface. The target writes `AGENTS.md` + `.claude/skills`. (#48)
+- **`.php` recognized as a code-bearing extension** — PHP source files are now counted by the scanner and domain discovery. (#47)
+
+### Changed
+- **`--target all` removed** — with three targets (and `codex`/`opencode` both owning `AGENTS.md`), `all` was ambiguous. Pick an explicit target: `--target claude|codex|opencode`. Passing `--target all` now errors with the valid list; run `doc init --target <one>` per target instead.
+
+### Fixed
+- **OpenCode runner hardening** — dropped `--dangerously-skip-permissions`; added a safe-charset guard on `--model` before it reaches argv; replaced shell-based temp-file cleanup with `rmSync`; buffered JSON events across stdout chunks so generated text isn't lost; classified rate-limit exits. (#48)
+- **`doc init` target/backend selection generalized** — the backend picker, target multiselect, and `inferConfig()` recovery now handle all three targets instead of hardcoding claude/codex; conflicting shared-output targets (`codex` + `opencode` both writing `AGENTS.md`) are rejected with a clear error. (#48)
+
+### Security
+- **Dev-dependency advisories resolved** — `npm audit fix` patched transitive `postcss`, `vite`, and `nanoid` advisories (dev-only; runtime dependencies were already clean). `npm audit` now reports 0 vulnerabilities.
+
 ## [0.8.0] - 2026-05-11
 
 ### Added
