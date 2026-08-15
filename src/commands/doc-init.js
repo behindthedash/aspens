@@ -287,7 +287,7 @@ export async function docInitCommand(path, options) {
   // --- Step 2: Target selection (what to generate FOR) ---
   let targetIds;
   if (options.target) {
-    targetIds = options.target === 'all' ? Object.keys(TARGETS) : [options.target];
+    targetIds = [options.target];
   } else if (recommendedTargetIds?.length) {
     targetIds = recommendedTargetIds;
   } else if (recommended) {
@@ -745,7 +745,7 @@ export async function docInitCommand(path, options) {
   // Generation always produces Claude-canonical format (.claude/skills/, CLAUDE.md).
   // For Claude target: canonical files are the final output (no transform needed).
   // For non-Claude targets: transform canonical → target format.
-  // For --target all: keep canonical + add transformed for each non-Claude target.
+  // For multiple targets: keep canonical + add transformed for each non-Claude target.
   const canonicalFiles = [...allFiles]; // preserve originals
   if (!shouldWriteIncrementally) {
     allFiles = buildOutputFilesForTargets(canonicalFiles, targets, scan, graphSerialized, repoPath);

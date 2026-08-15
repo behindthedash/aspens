@@ -50,13 +50,14 @@ describe('resolveTarget', () => {
 });
 
 describe('resolveTargets', () => {
-  it('returns all targets for "all"', () => {
-    const targets = resolveTargets('all');
-    expect(targets).toHaveLength(3);
-    const ids = targets.map(t => t.id);
-    expect(ids).toContain('claude');
-    expect(ids).toContain('codex');
-    expect(ids).toContain('opencode');
+  it('throws for the removed "all" option', () => {
+    expect(() => resolveTargets('all')).toThrow('Unknown target');
+  });
+
+  it('resolves a single opencode target', () => {
+    const targets = resolveTargets('opencode');
+    expect(targets).toHaveLength(1);
+    expect(targets[0].id).toBe('opencode');
   });
 
   it('returns array with claude only for "claude"', () => {

@@ -53,7 +53,6 @@ function showWelcome() {
     ${pc.green('aspens doc init --recommended')}     Install the full recommended setup
     ${pc.green('aspens doc init --dry-run')}         Preview without writing
     ${pc.green('aspens doc init --mode chunked')}    One domain at a time (large repos)
-    ${pc.green('aspens doc init --target all')}      Generate docs for every configured target
     ${pc.green('aspens doc init --model haiku')}     Use a specific backend model
     ${pc.green('aspens doc init --verbose')}         See backend activity in real time
     ${pc.green('aspens doc sync')}                   Update generated docs from recent commits
@@ -79,7 +78,7 @@ function showWelcome() {
     ${pc.yellow('--force')}            Overwrite existing files     ${pc.yellow('--model')} ${pc.dim('<m>')}   Choose backend model
     ${pc.yellow('--mode')} ${pc.dim('<mode>')}       all, chunked, base-only     ${pc.yellow('--timeout')} ${pc.dim('<s>')}  Seconds per call
     ${pc.yellow('--strategy')} ${pc.dim('<s>')}    improve, rewrite, skip      ${pc.yellow('--json')}      JSON output (scan)
-    ${pc.yellow('--target')} ${pc.dim('<t>')}       claude, codex, opencode, all ${pc.yellow('--backend')} ${pc.dim('<b>')} claude, codex, or opencode
+    ${pc.yellow('--target')} ${pc.dim('<t>')}       claude, codex, opencode      ${pc.yellow('--backend')} ${pc.dim('<b>')} claude, codex, or opencode
     ${pc.yellow('--no-hooks')}         Skip Claude hook installation ${pc.yellow('--hooks-only')}  Update Claude hooks only
     ${pc.yellow('--no-graph')}         Skip import graph analysis
 
@@ -165,7 +164,7 @@ doc
   .option('--no-hooks', 'Skip Claude hook/rules/settings installation')
   .option('--hooks-only', 'Skip doc generation, just install/update Claude hooks')
   .option('--no-graph', 'Skip import graph analysis')
-  .option('--target <target>', 'Output target: claude, codex, opencode, all')
+  .option('--target <target>', 'Output target: claude, codex, opencode')
   .option('--backend <backend>', 'Generation backend: claude, codex, opencode (default: matches target)')
   .action(docInitCommand);
 
