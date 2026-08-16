@@ -6,6 +6,8 @@ import {
   isTrivialImportStub,
   targetHasSubstantiveInstructions,
   chooseReuseSourceTarget,
+  disambiguateOpenCodeReuseSource,
+  assertNoTargetPathConflicts,
   looksLikeConversationalNonAnswer,
   looksLikeDrasticContentLoss,
   buildOutputFilesForTargets,
@@ -79,6 +81,52 @@ describe('chooseReuseSourceTarget — content-loss regression (aspens #issue: im
   it('is a no-op without repoPath (backward compatible)', () => {
     const chosen = chooseReuseSourceTarget([TARGETS.codex], true, true);
     expect(chosen).toBe(TARGETS.claude);
+  });
+});
+
+describe('disambiguateOpenCodeReuseSource', () => {
+  it('remaps codex to opencode when only opencode-shaped artifacts are present', () => {
+    // OpenCode repo: AGENTS.md + .claude/skills, no .codex/ or .agents/skills.
+    // chooseReuseSourceTarget can't tell this apart from codex on its own
+    // (both share AGENTS.md as instructionsFile), so it returns TARGETS.codex.
+    const scan = { hasCodexConfig: false, hasAgentsSkills: false };
+    expect(disambiguateOpenCodeReuseSource(TARGETS.codex, scan)).toBe(TARGETS.opencode);
+  });
+
+  it('leaves codex as codex when codex-specific artifacts are present', () => {
+    const withCodexConfig = { hasCodexConfig: true, hasAgentsSkills: false };
+    expect(disambiguateOpenCodeReuseSource(TARGETS.codex, withCodexConfig)).toBe(TARGETS.codex);
+
+    const withAgentsSkills = { hasCodexConfig: false, hasAgentsSkills: true };
+    expect(disambiguateOpenCodeReuseSource(TARGETS.codex, withAgentsSkills)).toBe(TARGETS.codex);
+  });
+
+  it('leaves claude and null untouched', () => {
+    const scan = { hasCodexConfig: false, hasAgentsSkills: false };
+    expect(disambiguateOpenCodeReuseSource(TARGETS.claude, scan)).toBe(TARGETS.claude);
+    expect(disambiguateOpenCodeReuseSource(null, scan)).toBe(null);
+  });
+});
+
+describe('assertNoTargetPathConflicts', () => {
+  it('throws when claude and opencode are combined (both write .claude/skills)', () => {
+    expect(() => assertNoTargetPathConflicts([TARGETS.claude, TARGETS.opencode])).toThrow(
+      /both write \.claude\/skills/
+    );
+  });
+
+  it('throws when codex and opencode are combined (both write AGENTS.md)', () => {
+    expect(() => assertNoTargetPathConflicts([TARGETS.codex, TARGETS.opencode])).toThrow(
+      /both write AGENTS\.md/
+    );
+  });
+
+  it('does not throw for claude + codex (no shared path)', () => {
+    expect(() => assertNoTargetPathConflicts([TARGETS.claude, TARGETS.codex])).not.toThrow();
+  });
+
+  it('does not throw for a single target', () => {
+    expect(() => assertNoTargetPathConflicts([TARGETS.opencode])).not.toThrow();
   });
 });
 

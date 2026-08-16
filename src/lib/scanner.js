@@ -19,6 +19,7 @@ export function scanRepo(repoPath, { extraDomains } = {}) {
     hasClaudeMd: existsSync(join(repoPath, 'CLAUDE.md')),
     hasCodexConfig: existsSync(join(repoPath, '.codex')),
     hasAgentsMd: existsSync(join(repoPath, 'AGENTS.md')),
+    hasAgentsSkills: existsSync(join(repoPath, '.agents/skills')),
     cicd: detectCICD(repoPath),
     database: detectDatabaseTools(repoPath),
     apiSpecs: detectAPISpecs(repoPath),

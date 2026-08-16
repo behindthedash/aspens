@@ -1,5 +1,22 @@
 import { describe, it, expect } from 'vitest';
-import { resolveBackend, BACKENDS } from '../src/lib/backend.js';
+import { resolveBackend, hasAnyBackend, BACKENDS } from '../src/lib/backend.js';
+
+describe('hasAnyBackend', () => {
+  it('is true when only opencode is available', () => {
+    // Regression: doc-impact's analysis gate used to check
+    // `available.claude || available.codex` directly and never noticed
+    // opencode, silently skipping analysis even with OpenCode installed.
+    expect(hasAnyBackend({ claude: false, codex: false, opencode: true })).toBe(true);
+  });
+
+  it('is true when any backend is available', () => {
+    expect(hasAnyBackend({ claude: true, codex: false, opencode: false })).toBe(true);
+  });
+
+  it('is false when no backend is available', () => {
+    expect(hasAnyBackend({ claude: false, codex: false, opencode: false })).toBe(false);
+  });
+});
 
 describe('resolveBackend', () => {
   describe('explicit backendFlag', () => {

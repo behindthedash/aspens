@@ -116,7 +116,10 @@ export function removeGitHook(repoPath) {
   }
 
   const projectLabel = toPosixRelative(gitRoot, repoPath) || '.';
-  const hookPath = join(gitRoot, '.git', 'hooks', 'post-commit');
+  // A linked worktree's `.git` is a FILE, not a directory — hooks live in
+  // the common dir shared by every worktree, matching installGitHook.
+  const gitCommonDir = getGitCommonDir(repoPath) || join(gitRoot, '.git');
+  const hookPath = join(gitCommonDir, 'hooks', 'post-commit');
 
   if (!existsSync(hookPath)) {
     console.log(pc.yellow('\n  No post-commit hook found.\n'));

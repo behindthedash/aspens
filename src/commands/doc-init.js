@@ -344,25 +344,7 @@ export async function docInitCommand(path, options) {
     }
   }
   const targets = targetIds.map(id => resolveTarget(id));
-
-  // codex and opencode both write their root instructions file to AGENTS.md
-  // but via different transforms (codex: directory-scoped restructure,
-  // opencode: centralized copy of CLAUDE.md) — combining them silently
-  // clobbers whichever one is written last. Reject the combination instead
-  // of guessing at ownership.
-  const instructionsFileOwners = new Map();
-  for (const target of targets) {
-    const owners = instructionsFileOwners.get(target.instructionsFile) || [];
-    owners.push(target);
-    instructionsFileOwners.set(target.instructionsFile, owners);
-  }
-  for (const [file, owners] of instructionsFileOwners) {
-    if (owners.length > 1) {
-      throw new CliError(
-        `Cannot generate for ${owners.map(t => t.label).join(' + ')} together — both write ${file} with different content. Run \`aspens doc init --target <one>\` separately for each.`
-      );
-    }
-  }
+  assertNoTargetPathConflicts(targets);
   const primaryTarget = targets[0];
   _primaryTarget = primaryTarget;
   _allowedPaths = null; // canonical generation uses defaults
@@ -438,7 +420,10 @@ export async function docInitCommand(path, options) {
   const hasClaudeDocs = scan.hasClaudeConfig || scan.hasClaudeMd;
   const hasCodexDocs = scan.hasAgentsMd;
   const hasExistingDocs = hasClaudeDocs || hasCodexDocs;
-  _reuseSourceTarget = chooseReuseSourceTarget(targets, hasClaudeDocs, hasCodexDocs, repoPath);
+  _reuseSourceTarget = disambiguateOpenCodeReuseSource(
+    chooseReuseSourceTarget(targets, hasClaudeDocs, hasCodexDocs, repoPath),
+    scan
+  );
   let skipDiscovery = false;
   if (hasExistingDocs && !isBaseOnly && !isDomainsOnly && options.strategy !== 'rewrite') {
     if (recommended) {
@@ -900,7 +885,7 @@ export async function docInitCommand(path, options) {
 
   // Offer auto-sync git hook (works for all targets — runs `aspens doc sync` on commit)
   const gitRoot = getGitRoot(repoPath);
-  if (!recommended && options.hook !== false && !options.dryRun && gitRoot) {
+  if (!recommended && !options.yes && options.hook !== false && !options.dryRun && gitRoot) {
     const hookPath = join(getGitCommonDir(repoPath) || join(gitRoot, '.git'), 'hooks', 'post-commit');
     const hookInstalled = existsSync(hookPath) &&
       readFileSync(hookPath, 'utf8').includes(`aspens doc-sync hook (${toPosixRelative(gitRoot, repoPath) || '.'})`);
@@ -1330,6 +1315,36 @@ export function targetHasSubstantiveInstructions(repoPath, target) {
   }
 }
 
+// codex and opencode both write their root instructions file to AGENTS.md
+// but via different transforms (codex: directory-scoped restructure,
+// opencode: centralized copy of CLAUDE.md); claude and opencode both write
+// skills to .claude/skills but via different transforms (claude: canonical
+// content, opencode: centralized-remapped content) — combining either pair
+// silently clobbers whichever is written last. Reject the combination
+// instead of guessing at ownership.
+export function assertNoTargetPathConflicts(targets) {
+  const ownersByPath = new Map();
+  for (const target of targets) {
+    for (const path of [target.instructionsFile, target.skillsDir]) {
+      if (!path) continue;
+      const owners = ownersByPath.get(path) || [];
+      owners.push(target);
+      ownersByPath.set(path, owners);
+    }
+  }
+  for (const [path, owners] of ownersByPath) {
+    // Dedup defensively in case the same target id was passed twice (e.g.
+    // a duplicate --target flag) — that's the same target claiming a path
+    // twice, not a real conflict between two different targets.
+    const distinctOwners = [...new Set(owners)];
+    if (distinctOwners.length > 1) {
+      throw new CliError(
+        `Cannot generate for ${distinctOwners.map(t => t.label).join(' + ')} together — both write ${path} with different content. Run \`aspens doc init --target <one>\` separately for each.`
+      );
+    }
+  }
+}
+
 export function chooseReuseSourceTarget(targets, hasClaudeDocs, hasCodexDocs, repoPath) {
   const wantsClaude = targets.some(t => t.id === 'claude');
   const wantsCodex = targets.some(t => t.id === 'codex');
@@ -1351,6 +1366,19 @@ export function chooseReuseSourceTarget(targets, hasClaudeDocs, hasCodexDocs, re
   if (hasClaudeDocs) return TARGETS.claude;
   if (hasCodexDocs) return TARGETS.codex;
   return null;
+}
+
+// OpenCode shares codex's instructionsFile (AGENTS.md) and claude's
+// skillsDir (.claude/skills), so chooseReuseSourceTarget's hasClaudeDocs/
+// hasCodexDocs signals alone can't tell it apart from codex. It's codex only
+// when codex-specific artifacts (.codex/ or .agents/skills) are also present
+// — otherwise an AGENTS.md + .claude/skills repo is OpenCode, matching
+// inferConfig's disambiguation in target.js.
+export function disambiguateOpenCodeReuseSource(chosenTarget, scan) {
+  if (chosenTarget?.id === 'codex' && !scan.hasCodexConfig && !scan.hasAgentsSkills) {
+    return TARGETS.opencode;
+  }
+  return chosenTarget;
 }
 
 function loadReusableDomains(repoPath, sourceTarget) {
@@ -1531,12 +1559,58 @@ async function generateAllAtOnce(repoPath, scan, repoGraph, selectedDomains, tim
   const claudeSpinner = p.spinner();
   claudeSpinner.start('Exploring repo and generating skills...');
 
+  const instrFile = 'CLAUDE.md';
+  let existingContentLength = 0;
+  if (strategy === 'improve' && _reuseSourceTarget?.instructionsFile) {
+    try {
+      existingContentLength = readFileSync(join(repoPath, _reuseSourceTarget.instructionsFile), 'utf8').trim().length;
+    } catch { /* no existing file to compare against */ }
+  }
+
   try {
-    const { text, usage } = await runLLM(fullPrompt, makeClaudeOptions(timeoutMs, verbose, model, claudeSpinner), _backendId);
+    let { text, usage } = await runLLM(fullPrompt, makeClaudeOptions(timeoutMs, verbose, model, claudeSpinner), _backendId);
     trackUsage(usage, fullPrompt.length);
-    let files = parseLLMOutput(text, _allowedPaths, 'CLAUDE.md');
+    let files = parseLLMOutput(text, _allowedPaths, instrFile);
+    let instrContent = files.find(f => f.path === instrFile)?.content;
+    // skip-existing intentionally omits CLAUDE.md from the prompt/output, so
+    // a missing instrContent there is expected, not a generation failure.
+    let isMissing = instrContent == null && strategy !== 'skip-existing';
+    let isConversational = !isMissing && instrContent != null && looksLikeConversationalNonAnswer(instrContent);
+    let isDrasticLoss = !isMissing && instrContent != null && !isConversational && looksLikeDrasticContentLoss(instrContent, existingContentLength);
+
+    // Retry up to 2 times if CLAUDE.md was missing from the output entirely,
+    // looked like a conversational non-answer, or discarded most of the
+    // existing content — mirrors the same checks generateChunked applies to
+    // its CLAUDE.md step.
+    const MAX_RETRIES = 2;
+    for (let attempt = 0; attempt < MAX_RETRIES && (isMissing || isConversational || isDrasticLoss); attempt++) {
+      const retryPrompt = isConversational
+        ? `Your previous response asked a clarifying question or hedged instead of generating the files. Do not ask questions — make your best judgment call and output the complete set of files now, each wrapped in <file path="...">...</file> tags, with CLAUDE.md starting with a markdown heading. Your previous (invalid) response was:\n\n${text}`
+        : isDrasticLoss
+          ? `Your previous response discarded most of the existing ${instrFile} content instead of preserving it — this is unacceptable data loss. Re-read the "## Existing" content in the original prompt and produce a CLAUDE.md that keeps essentially ALL of its real information (architecture, conventions, rules, commands), reorganizing or lightly editing only where genuinely needed. Output the complete set of files again, each wrapped in <file path="...">...</file> tags. Your previous (too-short) response was:\n\n${text}`
+          : `Your previous response did not include a <file path="CLAUDE.md">...</file> block among the generated files. Output the complete set of files again, including CLAUDE.md wrapped in exactly that tag format, starting with a markdown heading. Your previous output was:\n\n${text}`;
+      claudeSpinner.message(
+        isConversational
+          ? `CLAUDE.md looked like a question, not content — retry ${attempt + 1}/${MAX_RETRIES}...`
+          : isDrasticLoss
+            ? `CLAUDE.md discarded too much existing content — retry ${attempt + 1}/${MAX_RETRIES}...`
+            : `CLAUDE.md missing from output — retry ${attempt + 1}/${MAX_RETRIES}...`
+      );
+      const retry = await runLLM(retryPrompt, makeClaudeOptions(timeoutMs, verbose, model, null), _backendId);
+      trackUsage(retry.usage, retryPrompt.length);
+      files = parseLLMOutput(retry.text, _allowedPaths, instrFile);
+      instrContent = files.find(f => f.path === instrFile)?.content;
+      isMissing = instrContent == null && strategy !== 'skip-existing';
+      isConversational = !isMissing && instrContent != null && looksLikeConversationalNonAnswer(instrContent);
+      isDrasticLoss = !isMissing && instrContent != null && !isConversational && looksLikeDrasticContentLoss(instrContent, existingContentLength);
+      text = retry.text;
+    }
+
+    if (isMissing || isConversational || isDrasticLoss) {
+      p.log.warn(`Could not generate a valid CLAUDE.md after retries. Try: aspens doc init --strategy rewrite --mode base-only`);
+    }
+
     // Enforce skip-existing: filter out instructions file if it already exists
-    const instrFile = 'CLAUDE.md';
     if (strategy === 'skip-existing' && existsSync(join(repoPath, instrFile))) {
       files = files.filter(f => f.path !== instrFile);
     }

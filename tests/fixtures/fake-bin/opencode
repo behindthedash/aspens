@@ -1,0 +1,18 @@
+#!/usr/bin/env node
+// Fake OpenCode CLI for runner.test.js — emits an early empty-text event,
+// then a tool event, then a non-JSON raw marker line, and exits 0 without
+// ever producing non-empty text. Used to prove the raw-output fallback
+// buffer isn't truncated by an early (but empty) text part.
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function write(line) { return new Promise(r => process.stdout.write(line + '\n', r)); }
+
+async function main() {
+  await write(JSON.stringify({ type: 'text', part: { type: 'text', id: 'a', text: '' } }));
+  await sleep(30);
+  await write(JSON.stringify({ type: 'tool', part: { type: 'tool' } }));
+  await sleep(30);
+  await write('RAW_MARKER_XYZ');
+  process.exit(0);
+}
+
+main();

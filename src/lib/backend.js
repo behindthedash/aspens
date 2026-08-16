@@ -68,6 +68,17 @@ export function detectAvailableBackends() {
   return result;
 }
 
+/**
+ * True if any known backend is available — derived from BACKENDS so a new
+ * backend (e.g. a future 4th CLI) doesn't need every `available.<id>` call
+ * site updated by hand to notice it.
+ * @param {Record<string, boolean>} available
+ * @returns {boolean}
+ */
+export function hasAnyBackend(available) {
+  return Object.keys(BACKENDS).some(id => available[id]);
+}
+
 // ---------------------------------------------------------------------------
 // Resolution
 // ---------------------------------------------------------------------------

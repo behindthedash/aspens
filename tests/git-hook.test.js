@@ -190,4 +190,15 @@ describe.sequential('installGitHook in a linked worktree', () => {
     const content = readFileSync(HOOK_PATH, 'utf8');
     expect(content).toContain('# >>> aspens doc-sync hook (.) (do not edit) >>>');
   });
+
+  it('removes a hook installed from a linked worktree', () => {
+    // Before the fix, removeGitHook looked for `<worktree>/.git/hooks/post-commit`
+    // — nonexistent for a linked worktree, since its `.git` is a pointer file —
+    // and silently reported "No post-commit hook found" without removing anything.
+    installGitHook(WORKTREE_DIR);
+    expect(readFileSync(HOOK_PATH, 'utf8')).toContain('aspens doc-sync hook');
+
+    removeGitHook(WORKTREE_DIR);
+    expect(existsSync(HOOK_PATH)).toBe(false);
+  });
 });

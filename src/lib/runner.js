@@ -334,6 +334,11 @@ export function runOpenCode(prompt, options = {}) {
     const textPartsById = new Map();
     let usage = { output_tokens: 0, tool_uses: 0, tool_result_chars: 0 };
     let lineBuffer = '';
+    // Latches true on the first non-empty text part — a part's text only
+    // grows across streamed updates for the same id, never shrinks back to
+    // empty, so once this is true `combined` at close time is guaranteed
+    // non-empty and the raw-output fallback can never fire.
+    let hasRealText = false;
 
     function processOpenCodeLine(line) {
       if (!line.trim()) return;
@@ -342,6 +347,7 @@ export function runOpenCode(prompt, options = {}) {
         const part = event.part;
         if (event.type === 'text' && part?.type === 'text' && typeof part.text === 'string') {
           textPartsById.set(part.id, part.text);
+          if (part.text.length > 0) hasRealText = true;
         }
         if ((event.type === 'step_finish' || event.type === 'step-finish') && part?.tokens) {
           usage.output_tokens = part.tokens.output || 0;
@@ -358,7 +364,12 @@ export function runOpenCode(prompt, options = {}) {
     }
 
     child.stdout.on('data', (data) => {
-      chunks.push(data);
+      // `chunks` only feeds the raw-output fallback below, which triggers
+      // when combined text ends up empty. Once real (non-empty) text has
+      // been seen, the fallback can't fire, so stop duplicating the buffer.
+      if (!hasRealText) {
+        chunks.push(data);
+      }
       // Parse JSON events for text content — buffer across chunks since a
       // record can span multiple `data` callbacks.
       lineBuffer += data.toString('utf8');
