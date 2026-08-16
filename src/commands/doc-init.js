@@ -12,7 +12,7 @@ import { installGitHook } from '../lib/git-hook.js';
 import { CliError } from '../lib/errors.js';
 import { resolveTimeout } from '../lib/timeout.js';
 import { TARGETS, resolveTarget, getAllowedPaths, writeConfig, loadConfig, mergeConfiguredTargets } from '../lib/target.js';
-import { detectAvailableBackends, resolveBackend } from '../lib/backend.js';
+import { BACKENDS, detectAvailableBackends, resolveBackend } from '../lib/backend.js';
 import { transformForTarget, validateTransformedFiles, ensureRootKeyFilesSection, syncSkillsSection, syncBehaviorSection } from '../lib/target-transform.js';
 import { findSkillFiles } from '../lib/skill-reader.js';
 import { getGitRoot, getGitCommonDir } from '../lib/git-helpers.js';
