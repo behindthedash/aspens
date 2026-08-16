@@ -7,6 +7,7 @@ import { writeSkillFiles } from '../lib/skill-writer.js';
 import { CliError } from '../lib/errors.js';
 import { resolveTimeout } from '../lib/timeout.js';
 import { readConfig } from '../lib/target.js';
+import { isInteractive, failNonInteractive } from '../lib/interactive.js';
 
 const READ_ONLY_TOOLS = ['Read', 'Glob', 'Grep'];
 
@@ -137,10 +138,16 @@ export async function customizeCommand(what, options) {
     return;
   }
 
-  const proceed = await p.confirm({
-    message: `Update ${allFiles.length} agent(s)?`,
-    initialValue: true,
-  });
+  let proceed = true;
+  if (!options.yes) {
+    if (!isInteractive()) {
+      failNonInteractive(`update ${allFiles.length} agent(s) without confirmation`);
+    }
+    proceed = await p.confirm({
+      message: `Update ${allFiles.length} agent(s)?`,
+      initialValue: true,
+    });
+  }
 
   if (p.isCancel(proceed) || !proceed) {
     p.cancel('Aborted');

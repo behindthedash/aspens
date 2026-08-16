@@ -7,6 +7,7 @@ import { CliError } from '../lib/errors.js';
 import { resolveTimeout } from '../lib/timeout.js';
 import { runLLM, loadPrompt, parseFileOutput } from '../lib/runner.js';
 import { extractRulesFromSkills } from '../lib/skill-writer.js';
+import { isInteractive } from '../lib/interactive.js';
 import { findSkillFiles } from '../lib/skill-reader.js';
 import { TARGETS, getAllowedPaths, readConfig } from '../lib/target.js';
 
@@ -89,6 +90,13 @@ export async function addCommand(type, name, options) {
     if (available.length === 0) {
       console.log(pc.yellow(`\n  No ${type}s available in the library.\n`));
       return;
+    }
+
+    if (!isInteractive()) {
+      throw new CliError(
+        `Cannot prompt ("select ${type}(s) to add") in a non-interactive session (stdin is not a TTY). ` +
+        `Pass a name (e.g. "aspens add ${type} <name>" or "aspens add ${type} all") and retry.`
+      );
     }
 
     const picked = await p.multiselect({
