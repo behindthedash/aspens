@@ -197,6 +197,7 @@ doc
   .option('--timeout <seconds>', 'Backend timeout in seconds', parseTimeout, 300)
   .option('--verbose', 'Show backend reads/activity in real time')
   .option('--no-graph', 'Skip import graph analysis')
+  .option('--yes', 'Skip the apply confirmation prompt (for CI/scripted use)')
   .action(docImpactCommand);
 
 doc
@@ -240,6 +241,7 @@ program
   .option('--timeout <seconds>', 'Claude timeout in seconds', parseTimeout, 300)
   .option('--model <model>', 'Claude model to use (e.g., sonnet, opus, haiku)')
   .option('--verbose', 'Show what Claude is reading/doing in real time')
+  .option('--yes', 'Skip the update confirmation prompt (for CI/scripted use)')
   .action((what, options) => {
     checkMissingHooks(resolve('.'));
     return customizeCommand(what, options);

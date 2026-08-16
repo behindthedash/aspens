@@ -11,6 +11,7 @@ import {
   buildSaveTokensSettings,
 } from '../lib/save-tokens.js';
 import { mergeSettings } from '../lib/skill-writer.js';
+import { isInteractive, failNonInteractive } from '../lib/interactive.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TEMPLATES_DIR = join(__dirname, '..', 'templates');
@@ -49,6 +50,10 @@ export async function saveTokensCommand(path = '.', _options = {}) {
     renderInstallSummary(summaryLines, targets.includes('claude'), targets.includes('codex'));
     p.outro(pc.green('save-tokens configured'));
     return;
+  }
+
+  if (!isInteractive()) {
+    failNonInteractive('select save-tokens settings (use --recommended to install without prompts)');
   }
 
   const selectedFeatures = await selectSaveTokensFeatures();

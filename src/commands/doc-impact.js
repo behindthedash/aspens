@@ -5,6 +5,7 @@ import { analyzeImpact, summarizeValueComparison } from '../lib/impact.js';
 import { detectAvailableBackends, hasAnyBackend, resolveBackend } from '../lib/backend.js';
 import { loadPrompt, runLLM } from '../lib/runner.js';
 import { CliError } from '../lib/errors.js';
+import { isInteractive, failNonInteractive } from '../lib/interactive.js';
 import { docInitCommand } from './doc-init.js';
 import { docSyncCommand } from './doc-sync.js';
 
@@ -172,10 +173,16 @@ export async function docImpactCommand(path, options) {
   const applyPlan = buildApplyPlan(report.targets);
 
   if (applyPlan.length > 0 && options.apply) {
-    const confirmApply = await p.confirm({
-      message: buildApplyConfirmationMessage(),
-      initialValue: true,
-    });
+    let confirmApply = true;
+    if (!options.yes) {
+      if (!isInteractive()) {
+        failNonInteractive('apply recommended fixes without confirmation');
+      }
+      confirmApply = await p.confirm({
+        message: buildApplyConfirmationMessage(),
+        initialValue: true,
+      });
+    }
 
     if (!p.isCancel(confirmApply) && confirmApply) {
       p.log.info(`Applying ${applyPlan.length} recommended action(s)...`);
