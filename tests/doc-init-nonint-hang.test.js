@@ -1,11 +1,26 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'fs';
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import { join } from 'path';
 
 const CLI = join(import.meta.dirname, '..', 'bin', 'cli.js');
 const FIXTURE_DIR = join(import.meta.dirname, 'tmp-nonint-hang-fixture');
 const BOUND_MS = 15000; // generous ceiling; a fixed run must finish well under it
+
+// Mirrors src/lib/backend.js's own detection (a lightweight `--version`
+// check) — test-local, no production code touched. Neither test needs a
+// real backend to be authenticated, only present on PATH: `doc init` starts
+// generation (and hangs, pre-fix) before ever making a network call.
+function detectFirstAvailableBackend() {
+  for (const [id, cmd] of [['claude', 'claude'], ['codex', 'codex'], ['opencode', 'opencode']]) {
+    try {
+      execSync(`${cmd} --version`, { stdio: 'pipe', timeout: 10000 });
+      return id;
+    } catch { /* not installed */ }
+  }
+  return null;
+}
+const AVAILABLE_BACKEND = detectFirstAvailableBackend();
 
 beforeEach(() => {
   if (existsSync(FIXTURE_DIR)) rmSync(FIXTURE_DIR, { recursive: true, force: true });
@@ -49,9 +64,15 @@ function runWithOpenStdin(args) {
 }
 
 describe('doc init — non-interactive stdin never hangs', () => {
-  it('resolves the reuse-domains confirm via --yes instead of hanging', async () => {
+  // Both cases need at least one backend CLI present on PATH to get past
+  // Step 0's own "no backend installed" check and actually reach the
+  // prompt sites this fix guards — stock CI (no claude/codex/opencode
+  // installed) skips them rather than failing on an unrelated missing
+  // binary. Neither reads network/auth: a bare `--version` success is
+  // enough, since generation is asserted to *start*, never to complete.
+  it.skipIf(!AVAILABLE_BACKEND)('resolves the reuse-domains confirm via --yes instead of hanging', async () => {
     const { timedOut, stdout } = await runWithOpenStdin([
-      'doc', 'init', '--target', 'claude', '--backend', 'claude',
+      'doc', 'init', '--target', AVAILABLE_BACKEND, '--backend', AVAILABLE_BACKEND,
       '--no-hook', '--timeout', '2', '--yes',
     ]);
 
@@ -62,7 +83,7 @@ describe('doc init — non-interactive stdin never hangs', () => {
     expect(stdout).toContain('Generating');
   }, BOUND_MS + 3000);
 
-  it('fails fast with a clear error instead of hanging when no flag resolves the choice', async () => {
+  it.skipIf(!AVAILABLE_BACKEND)('fails fast with a clear error instead of hanging when no flag resolves the choice', async () => {
     const { timedOut, code, stderr } = await runWithOpenStdin(['doc', 'init']);
 
     expect(timedOut).toBe(false);
