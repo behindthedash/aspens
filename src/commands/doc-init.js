@@ -12,10 +12,10 @@ import { installGitHook } from '../lib/git-hook.js';
 import { CliError } from '../lib/errors.js';
 import { resolveTimeout } from '../lib/timeout.js';
 import { TARGETS, resolveTarget, getAllowedPaths, writeConfig, loadConfig, mergeConfiguredTargets } from '../lib/target.js';
-import { detectAvailableBackends, resolveBackend } from '../lib/backend.js';
+import { BACKENDS, detectAvailableBackends, resolveBackend } from '../lib/backend.js';
 import { transformForTarget, validateTransformedFiles, ensureRootKeyFilesSection, syncSkillsSection, syncBehaviorSection } from '../lib/target-transform.js';
 import { findSkillFiles } from '../lib/skill-reader.js';
-import { getGitRoot } from '../lib/git-helpers.js';
+import { getGitRoot, getGitCommonDir } from '../lib/git-helpers.js';
 import { installSaveTokensRecommended } from './save-tokens.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -73,6 +73,35 @@ function parseLLMOutput(text, allowedPaths, expectedPath) {
     files = [{ path: expectedPath, content: text.trim() + '\n' }];
   }
   return files;
+}
+
+// A root instructions file's real content always has at least one markdown
+// heading. A model that second-guesses itself mid-generation and writes a
+// clarifying question instead (e.g. "I'd rather confirm than guess... let me
+// know") still gets wrapped in valid <file> tags, so parseLLMOutput accepts
+// it — this catches that case so it retries instead of being written as-is.
+// Real-world observation: even with explicit preservation instructions, the
+// model can still non-deterministically collapse a large existing doc down
+// to a small fraction of its length on any given run (observed: 434 lines
+// -> 6 lines on one run, -> 109 lines on another, same code/prompt). A
+// length-ratio check catches this class of bad roll regardless of *why* it
+// happened, the same way looksLikeConversationalNonAnswer catches a
+// different bad-roll shape.
+export function looksLikeDrasticContentLoss(newContent, existingContentLength, minRatio = 0.3) {
+  if (!existingContentLength || existingContentLength < 500) return false; // too small a baseline to judge
+  const newLength = (newContent || '').trim().length;
+  return newLength < existingContentLength * minRatio;
+}
+
+export function looksLikeConversationalNonAnswer(content) {
+  const trimmed = (content || '').trim();
+  if (!trimmed) return true;
+  // Check only the first line: a deterministically-injected `## Skills`
+  // section further down would otherwise mask conversational text that
+  // precedes it, since that section is always appended regardless of what
+  // the model wrote (see doc-init-claudemd.md's own instructions).
+  const firstLine = trimmed.split('\n')[0];
+  return !/^#{1,6}\s/.test(firstLine);
 }
 
 // Canonical (Claude) vars for prompts — generation always uses Claude format.
@@ -137,7 +166,7 @@ function validateGeneratedChunk(files, repoPath) {
   return files;
 }
 
-function buildOutputFilesForTargets(canonicalFiles, targets, scan, graphSerialized, repoPath) {
+export function buildOutputFilesForTargets(canonicalFiles, targets, scan, graphSerialized, repoPath) {
   let outputFiles = [...canonicalFiles];
   const nonClaudeTargets = targets.filter(target => target.id !== 'claude');
 
@@ -229,11 +258,13 @@ export async function docInitCommand(path, options) {
 
   // --- Step 0: Detect available backends ---
   const available = detectAvailableBackends();
-  if (!available.claude && !available.codex) {
+  if (!available.claude && !available.codex && !available.opencode) {
+    const installLines = [];
+    for (const backend of Object.values(BACKENDS)) {
+      installLines.push(`  Install ${backend.label}: ${backend.installUrl}`);
+    }
     throw new CliError(
-      'aspens requires either Claude CLI or Codex CLI.\n' +
-      '  Install Claude CLI: https://docs.anthropic.com/claude-code\n' +
-      '  Install Codex CLI: https://github.com/openai/codex'
+      'aspens requires Claude CLI, Codex CLI, or OpenCode CLI.\n' + installLines.join('\n')
     );
   }
 
@@ -257,15 +288,22 @@ export async function docInitCommand(path, options) {
     backendResult = resolveBackend({ backendFlag: recommendedBackendId, available });
   } else if (recommended && recommendedTargetIds?.length === 1) {
     backendResult = resolveBackend({ targetId: recommendedTargetIds[0], available });
-  } else if (available.claude && available.codex && !recommended) {
-    const backendChoice = await p.select({
-      message: 'Which AI should generate the docs?',
-      options: [
-        { value: 'claude', label: 'Claude CLI', hint: 'uses your Anthropic subscription' },
-        { value: 'codex', label: 'Codex CLI', hint: 'uses your OpenAI subscription' },
-      ],
-    });
-    if (p.isCancel(backendChoice)) { p.cancel('Aborted'); return; }
+  } else if (!recommended) {
+    const availableBackends = Object.keys(available).filter(id => available[id]);
+    let backendChoice;
+    if (availableBackends.length > 1) {
+      backendChoice = await p.select({
+        message: 'Which AI should generate the docs?',
+        options: availableBackends.map(id => ({
+          value: id,
+          label: BACKENDS[id].label,
+          hint: `uses ${BACKENDS[id].label}`,
+        })),
+      });
+      if (p.isCancel(backendChoice)) { p.cancel('Aborted'); return; }
+    } else {
+      backendChoice = availableBackends[0];
+    }
     backendResult = resolveBackend({ backendFlag: backendChoice, available });
   } else {
     // Only one available — use it
@@ -278,28 +316,35 @@ export async function docInitCommand(path, options) {
   // --- Step 2: Target selection (what to generate FOR) ---
   let targetIds;
   if (options.target) {
-    targetIds = options.target === 'all' ? ['claude', 'codex'] : [options.target];
+    targetIds = [options.target];
   } else if (recommendedTargetIds?.length) {
     targetIds = recommendedTargetIds;
   } else if (recommended) {
     targetIds = [backend.id];
-  } else if (available.claude && available.codex) {
-    const selected = await p.multiselect({
-      message: 'Generate docs for which coding agents?',
-      options: [
-        { value: 'claude', label: 'Claude Code', hint: 'CLAUDE.md + .claude/skills/ + hooks' },
-        { value: 'codex', label: 'Codex CLI', hint: 'AGENTS.md + .agents/skills/' },
-      ],
-      initialValues: [backend.id], // pre-select matching target
-      required: true,
-    });
-    if (p.isCancel(selected)) { p.cancel('Aborted'); return; }
-    targetIds = selected;
   } else {
-    // Only one CLI — generate for matching target
-    targetIds = [available.claude ? 'claude' : 'codex'];
+    // A target is an output format, not a backend — aspens transforms the
+    // canonical output into each target itself, so offer every configured
+    // target regardless of which generating CLI is installed. (available[]
+    // gates backend selection only, in Step 1.)
+    const targetChoiceIds = Object.keys(TARGETS);
+    if (targetChoiceIds.length > 1) {
+      const selected = await p.multiselect({
+        message: 'Generate docs for which coding agents?',
+        options: targetChoiceIds.map(id => ({
+          value: id,
+          label: TARGETS[id].label,
+        })),
+        initialValues: [backend.id], // pre-select the target matching the backend
+        required: true,
+      });
+      if (p.isCancel(selected)) { p.cancel('Aborted'); return; }
+      targetIds = selected;
+    } else {
+      targetIds = [backend.id];
+    }
   }
   const targets = targetIds.map(id => resolveTarget(id));
+  assertNoTargetPathConflicts(targets);
   const primaryTarget = targets[0];
   _primaryTarget = primaryTarget;
   _allowedPaths = null; // canonical generation uses defaults
@@ -375,7 +420,10 @@ export async function docInitCommand(path, options) {
   const hasClaudeDocs = scan.hasClaudeConfig || scan.hasClaudeMd;
   const hasCodexDocs = scan.hasAgentsMd;
   const hasExistingDocs = hasClaudeDocs || hasCodexDocs;
-  _reuseSourceTarget = chooseReuseSourceTarget(targets, hasClaudeDocs, hasCodexDocs);
+  _reuseSourceTarget = disambiguateOpenCodeReuseSource(
+    chooseReuseSourceTarget(targets, hasClaudeDocs, hasCodexDocs, repoPath),
+    scan
+  );
   let skipDiscovery = false;
   if (hasExistingDocs && !isBaseOnly && !isDomainsOnly && options.strategy !== 'rewrite') {
     if (recommended) {
@@ -649,7 +697,7 @@ export async function docInitCommand(path, options) {
     p.log.info(pc.dim(`Using existing ${_reuseSourceTarget.label} docs as improvement context.`));
   }
 
-  if (shouldWriteIncrementally) {
+  if (shouldWriteIncrementally && !options.yes) {
     console.log();
     const allowIncrementalWrite = await p.confirm({
       message: 'Allow aspens to write generated files incrementally during chunked generation? This includes skills, repo docs, and supported hook/config updates.',
@@ -714,7 +762,7 @@ export async function docInitCommand(path, options) {
   // Generation always produces Claude-canonical format (.claude/skills/, CLAUDE.md).
   // For Claude target: canonical files are the final output (no transform needed).
   // For non-Claude targets: transform canonical → target format.
-  // For --target all: keep canonical + add transformed for each non-Claude target.
+  // For multiple targets: keep canonical + add transformed for each non-Claude target.
   const canonicalFiles = [...allFiles]; // preserve originals
   if (!shouldWriteIncrementally) {
     allFiles = buildOutputFilesForTargets(canonicalFiles, targets, scan, graphSerialized, repoPath);
@@ -747,14 +795,16 @@ export async function docInitCommand(path, options) {
     }
 
     // Confirm
-    const proceed = await p.confirm({
-      message: `Write ${allFiles.length} files to ${repoPath}?`,
-      initialValue: true,
-    });
+    if (!options.yes) {
+      const proceed = await p.confirm({
+        message: `Write ${allFiles.length} files to ${repoPath}?`,
+        initialValue: true,
+      });
 
-    if (p.isCancel(proceed) || !proceed) {
-      p.cancel('Aborted');
-      return;
+      if (p.isCancel(proceed) || !proceed) {
+        p.cancel('Aborted');
+        return;
+      }
     }
 
     // Step 8: Write files
@@ -805,7 +855,7 @@ export async function docInitCommand(path, options) {
 
     const gitRoot = getGitRoot(repoPath);
     if (gitRoot && options.hook !== false) {
-      const hookPath = join(gitRoot, '.git', 'hooks', 'post-commit');
+      const hookPath = join(getGitCommonDir(repoPath) || join(gitRoot, '.git'), 'hooks', 'post-commit');
       const hookInstalled = existsSync(hookPath) &&
         readFileSync(hookPath, 'utf8').includes(`aspens doc-sync hook (${toPosixRelative(gitRoot, repoPath) || '.'})`);
       if (!hookInstalled) {
@@ -835,8 +885,8 @@ export async function docInitCommand(path, options) {
 
   // Offer auto-sync git hook (works for all targets — runs `aspens doc sync` on commit)
   const gitRoot = getGitRoot(repoPath);
-  if (!recommended && options.hook !== false && !options.dryRun && gitRoot) {
-    const hookPath = join(gitRoot, '.git', 'hooks', 'post-commit');
+  if (!recommended && !options.yes && options.hook !== false && !options.dryRun && gitRoot) {
+    const hookPath = join(getGitCommonDir(repoPath) || join(gitRoot, '.git'), 'hooks', 'post-commit');
     const hookInstalled = existsSync(hookPath) &&
       readFileSync(hookPath, 'utf8').includes(`aspens doc-sync hook (${toPosixRelative(gitRoot, repoPath) || '.'})`);
     if (!hookInstalled) {
@@ -1244,9 +1294,70 @@ function buildStrategyInstruction(strategy) {
   return '';
 }
 
-function chooseReuseSourceTarget(targets, hasClaudeDocs, hasCodexDocs) {
+// A bare single-line `@<path>` import (the standard convention for pointing
+// CLAUDE.md/AGENTS.md at each other, e.g. `@AGENTS.md`) carries none of its
+// own content — treating it as substantive "existing docs" starves the
+// improve-strategy prompt of the real content, which lives in the file it
+// points to.
+export function isTrivialImportStub(content) {
+  const trimmed = (content || '').trim();
+  return trimmed === '' || /^@\S+$/.test(trimmed);
+}
+
+export function targetHasSubstantiveInstructions(repoPath, target) {
+  if (!target?.instructionsFile) return false;
+  const path = join(repoPath, target.instructionsFile);
+  if (!existsSync(path)) return false;
+  try {
+    return !isTrivialImportStub(readFileSync(path, 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+// codex and opencode both write their root instructions file to AGENTS.md
+// but via different transforms (codex: directory-scoped restructure,
+// opencode: centralized copy of CLAUDE.md); claude and opencode both write
+// skills to .claude/skills but via different transforms (claude: canonical
+// content, opencode: centralized-remapped content) — combining either pair
+// silently clobbers whichever is written last. Reject the combination
+// instead of guessing at ownership.
+export function assertNoTargetPathConflicts(targets) {
+  const ownersByPath = new Map();
+  for (const target of targets) {
+    for (const path of [target.instructionsFile, target.skillsDir]) {
+      if (!path) continue;
+      const owners = ownersByPath.get(path) || [];
+      owners.push(target);
+      ownersByPath.set(path, owners);
+    }
+  }
+  for (const [path, owners] of ownersByPath) {
+    // Dedup defensively in case the same target id was passed twice (e.g.
+    // a duplicate --target flag) — that's the same target claiming a path
+    // twice, not a real conflict between two different targets.
+    const distinctOwners = [...new Set(owners)];
+    if (distinctOwners.length > 1) {
+      throw new CliError(
+        `Cannot generate for ${distinctOwners.map(t => t.label).join(' + ')} together — both write ${path} with different content. Run \`aspens doc init --target <one>\` separately for each.`
+      );
+    }
+  }
+}
+
+export function chooseReuseSourceTarget(targets, hasClaudeDocs, hasCodexDocs, repoPath) {
   const wantsClaude = targets.some(t => t.id === 'claude');
   const wantsCodex = targets.some(t => t.id === 'codex');
+
+  // When both formats exist, prefer whichever one actually has real content
+  // to reuse — a stub import pointing at the other format's file is not
+  // "existing docs" worth basing generation on.
+  if (hasClaudeDocs && hasCodexDocs && repoPath) {
+    const claudeSubstantive = targetHasSubstantiveInstructions(repoPath, TARGETS.claude);
+    const codexSubstantive = targetHasSubstantiveInstructions(repoPath, TARGETS.codex);
+    if (claudeSubstantive && !codexSubstantive) return TARGETS.claude;
+    if (codexSubstantive && !claudeSubstantive) return TARGETS.codex;
+  }
 
   if (hasClaudeDocs && !hasCodexDocs) return TARGETS.claude;
   if (hasCodexDocs && !hasClaudeDocs) return TARGETS.codex;
@@ -1255,6 +1366,19 @@ function chooseReuseSourceTarget(targets, hasClaudeDocs, hasCodexDocs) {
   if (hasClaudeDocs) return TARGETS.claude;
   if (hasCodexDocs) return TARGETS.codex;
   return null;
+}
+
+// OpenCode shares codex's instructionsFile (AGENTS.md) and claude's
+// skillsDir (.claude/skills), so chooseReuseSourceTarget's hasClaudeDocs/
+// hasCodexDocs signals alone can't tell it apart from codex. It's codex only
+// when codex-specific artifacts (.codex/ or .agents/skills) are also present
+// — otherwise an AGENTS.md + .claude/skills repo is OpenCode, matching
+// inferConfig's disambiguation in target.js.
+export function disambiguateOpenCodeReuseSource(chosenTarget, scan) {
+  if (chosenTarget?.id === 'codex' && !scan.hasCodexConfig && !scan.hasAgentsSkills) {
+    return TARGETS.opencode;
+  }
+  return chosenTarget;
 }
 
 function loadReusableDomains(repoPath, sourceTarget) {
@@ -1435,12 +1559,58 @@ async function generateAllAtOnce(repoPath, scan, repoGraph, selectedDomains, tim
   const claudeSpinner = p.spinner();
   claudeSpinner.start('Exploring repo and generating skills...');
 
+  const instrFile = 'CLAUDE.md';
+  let existingContentLength = 0;
+  if (strategy === 'improve' && _reuseSourceTarget?.instructionsFile) {
+    try {
+      existingContentLength = readFileSync(join(repoPath, _reuseSourceTarget.instructionsFile), 'utf8').trim().length;
+    } catch { /* no existing file to compare against */ }
+  }
+
   try {
-    const { text, usage } = await runLLM(fullPrompt, makeClaudeOptions(timeoutMs, verbose, model, claudeSpinner), _backendId);
+    let { text, usage } = await runLLM(fullPrompt, makeClaudeOptions(timeoutMs, verbose, model, claudeSpinner), _backendId);
     trackUsage(usage, fullPrompt.length);
-    let files = parseLLMOutput(text, _allowedPaths, 'CLAUDE.md');
+    let files = parseLLMOutput(text, _allowedPaths, instrFile);
+    let instrContent = files.find(f => f.path === instrFile)?.content;
+    // skip-existing intentionally omits CLAUDE.md from the prompt/output, so
+    // a missing instrContent there is expected, not a generation failure.
+    let isMissing = instrContent == null && strategy !== 'skip-existing';
+    let isConversational = !isMissing && instrContent != null && looksLikeConversationalNonAnswer(instrContent);
+    let isDrasticLoss = !isMissing && instrContent != null && !isConversational && looksLikeDrasticContentLoss(instrContent, existingContentLength);
+
+    // Retry up to 2 times if CLAUDE.md was missing from the output entirely,
+    // looked like a conversational non-answer, or discarded most of the
+    // existing content — mirrors the same checks generateChunked applies to
+    // its CLAUDE.md step.
+    const MAX_RETRIES = 2;
+    for (let attempt = 0; attempt < MAX_RETRIES && (isMissing || isConversational || isDrasticLoss); attempt++) {
+      const retryPrompt = isConversational
+        ? `Your previous response asked a clarifying question or hedged instead of generating the files. Do not ask questions — make your best judgment call and output the complete set of files now, each wrapped in <file path="...">...</file> tags, with CLAUDE.md starting with a markdown heading. Your previous (invalid) response was:\n\n${text}`
+        : isDrasticLoss
+          ? `Your previous response discarded most of the existing ${instrFile} content instead of preserving it — this is unacceptable data loss. Re-read the "## Existing" content in the original prompt and produce a CLAUDE.md that keeps essentially ALL of its real information (architecture, conventions, rules, commands), reorganizing or lightly editing only where genuinely needed. Output the complete set of files again, each wrapped in <file path="...">...</file> tags. Your previous (too-short) response was:\n\n${text}`
+          : `Your previous response did not include a <file path="CLAUDE.md">...</file> block among the generated files. Output the complete set of files again, including CLAUDE.md wrapped in exactly that tag format, starting with a markdown heading. Your previous output was:\n\n${text}`;
+      claudeSpinner.message(
+        isConversational
+          ? `CLAUDE.md looked like a question, not content — retry ${attempt + 1}/${MAX_RETRIES}...`
+          : isDrasticLoss
+            ? `CLAUDE.md discarded too much existing content — retry ${attempt + 1}/${MAX_RETRIES}...`
+            : `CLAUDE.md missing from output — retry ${attempt + 1}/${MAX_RETRIES}...`
+      );
+      const retry = await runLLM(retryPrompt, makeClaudeOptions(timeoutMs, verbose, model, null), _backendId);
+      trackUsage(retry.usage, retryPrompt.length);
+      files = parseLLMOutput(retry.text, _allowedPaths, instrFile);
+      instrContent = files.find(f => f.path === instrFile)?.content;
+      isMissing = instrContent == null && strategy !== 'skip-existing';
+      isConversational = !isMissing && instrContent != null && looksLikeConversationalNonAnswer(instrContent);
+      isDrasticLoss = !isMissing && instrContent != null && !isConversational && looksLikeDrasticContentLoss(instrContent, existingContentLength);
+      text = retry.text;
+    }
+
+    if (isMissing || isConversational || isDrasticLoss) {
+      p.log.warn(`Could not generate a valid CLAUDE.md after retries. Try: aspens doc init --strategy rewrite --mode base-only`);
+    }
+
     // Enforce skip-existing: filter out instructions file if it already exists
-    const instrFile = 'CLAUDE.md';
     if (strategy === 'skip-existing' && existsSync(join(repoPath, instrFile))) {
       files = files.filter(f => f.path !== instrFile);
     }
@@ -1675,26 +1845,49 @@ async function generateChunked(repoPath, scan, repoGraph, domains, baseOnly, tim
     }
 
     const rootGraphContext = buildRootInstructionsGraphContext(repoGraph);
-    const claudeMdPrompt = loadPrompt('doc-init-claudemd', CANONICAL_VARS) +
+    const claudeMdPrompt = loadPrompt('doc-init-claudemd', CANONICAL_VARS) + strategyNote +
       `\n\n---\n\nRepository path: ${repoPath}\n\n## Scan Results\nRepo: ${scan.name} (${scan.repoType})\nLanguages: ${scan.languages.join(', ')}\nFrameworks: ${scan.frameworks.join(', ')}\nEntry points: ${scan.entryPoints.join(', ')}\n\n## Generated Skills\n${skillSummaries}${rootGraphContext ? `\n\n${rootGraphContext}` : ''}${existingClaudeMdSection}`;
+
+    let existingContentLength = 0;
+    if (strategy === 'improve' && _reuseSourceTarget?.instructionsFile) {
+      try {
+        existingContentLength = readFileSync(join(repoPath, _reuseSourceTarget.instructionsFile), 'utf8').trim().length;
+      } catch { /* no existing file to compare against */ }
+    }
 
     try {
       let { text, usage } = await runLLM(claudeMdPrompt, makeClaudeOptions(timeoutMs, verbose, model, claudeMdSpinner), _backendId);
       trackUsage(usage, claudeMdPrompt.length);
       let files = parseLLMOutput(text, _allowedPaths, 'CLAUDE.md');
+      let isConversational = files.length > 0 && looksLikeConversationalNonAnswer(files[0].content);
+      let isDrasticLoss = files.length > 0 && !isConversational && looksLikeDrasticContentLoss(files[0].content, existingContentLength);
 
-      // Retry up to 2 times if LLM didn't produce parseable output
+      // Retry up to 2 times if the LLM didn't produce parseable output,
+      // produced a conversational non-answer instead of real content, or
+      // discarded most of the existing content it was supposed to preserve.
       const MAX_RETRIES = 2;
-      for (let attempt = 0; attempt < MAX_RETRIES && files.length === 0; attempt++) {
-        claudeMdSpinner.message(`${instructionsArtifactLabel()} missing file tags — retry ${attempt + 1}/${MAX_RETRIES}...`);
-        const retryPrompt = `Your previous response did not include the required <file path="CLAUDE.md">content</file> XML tags. I need you to output CLAUDE.md wrapped in exactly this format:\n\n<file path="CLAUDE.md">\n# project-name\n[CLAUDE.md content]\n</file>\n\nHere is your previous output — please re-wrap it correctly:\n\n${text}`;
+      for (let attempt = 0; attempt < MAX_RETRIES && (files.length === 0 || isConversational || isDrasticLoss); attempt++) {
+        const retryPrompt = isConversational
+          ? `Your previous response asked a clarifying question or hedged instead of generating the file. Do not ask questions — make your best judgment call and output the complete file now, wrapped in <file path="CLAUDE.md">...</file> tags, starting with a markdown heading. Your previous (invalid) response was:\n\n${text}`
+          : isDrasticLoss
+            ? `Your previous response discarded most of the existing content instead of preserving it — this is unacceptable data loss. Re-read the "## Existing ${instructionsArtifactLabel()}" content in the original prompt and produce a version that keeps essentially ALL of its real information (architecture, conventions, rules, commands), reorganizing or lightly editing only where genuinely needed. Do not summarize it down. Output the complete file now, wrapped in <file path="CLAUDE.md">...</file> tags. Your previous (too-short) response was:\n\n${text}`
+            : `Your previous response did not include the required <file path="...">content</file> XML tags. I need you to output CLAUDE.md wrapped in exactly this format:\n\n<file path="CLAUDE.md">\n# project-name\n[CLAUDE.md content]\n</file>\n\nHere is your previous output — please re-wrap it correctly:\n\n${text}`;
+        claudeMdSpinner.message(
+          isConversational
+            ? `${instructionsArtifactLabel()} looked like a question, not content — retry ${attempt + 1}/${MAX_RETRIES}...`
+            : isDrasticLoss
+              ? `${instructionsArtifactLabel()} discarded too much existing content — retry ${attempt + 1}/${MAX_RETRIES}...`
+              : `${instructionsArtifactLabel()} missing file tags — retry ${attempt + 1}/${MAX_RETRIES}...`
+        );
         const retry = await runLLM(retryPrompt, makeClaudeOptions(timeoutMs, verbose, model, null), _backendId);
         trackUsage(retry.usage, retryPrompt.length);
         files = parseLLMOutput(retry.text, _allowedPaths, 'CLAUDE.md');
+        isConversational = files.length > 0 && looksLikeConversationalNonAnswer(files[0].content);
+        isDrasticLoss = files.length > 0 && !isConversational && looksLikeDrasticContentLoss(files[0].content, existingContentLength);
         text = retry.text;
       }
 
-      if (files.length === 0) {
+      if (files.length === 0 || isConversational || isDrasticLoss) {
         claudeMdSpinner.stop(pc.yellow(`${instructionsArtifactLabel()} — failed after retries`));
         p.log.warn(`Could not generate ${instructionsArtifactLabel()}. Try: aspens doc init --strategy rewrite --mode base-only`);
       } else {

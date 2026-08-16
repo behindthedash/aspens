@@ -50,12 +50,14 @@ describe('resolveTarget', () => {
 });
 
 describe('resolveTargets', () => {
-  it('returns both targets for "all"', () => {
-    const targets = resolveTargets('all');
-    expect(targets).toHaveLength(2);
-    const ids = targets.map(t => t.id);
-    expect(ids).toContain('claude');
-    expect(ids).toContain('codex');
+  it('throws for the removed "all" option', () => {
+    expect(() => resolveTargets('all')).toThrow('Unknown target');
+  });
+
+  it('resolves a single opencode target', () => {
+    const targets = resolveTargets('opencode');
+    expect(targets).toHaveLength(1);
+    expect(targets[0].id).toBe('opencode');
   });
 
   it('returns array with claude only for "claude"', () => {
@@ -211,6 +213,29 @@ describe('config persistence', () => {
     expect(config).not.toBeNull();
     expect(config.targets).toEqual(['claude', 'codex']);
     expect(config.backend).toBeNull();
+  });
+
+  it('infers opencode target from AGENTS.md + .claude/skills without codex artifacts', () => {
+    const dir = join(FIXTURES_DIR, 'config-infer-opencode');
+    mkdirSync(join(dir, '.claude', 'skills'), { recursive: true });
+    writeFileSync(join(dir, 'AGENTS.md'), '# docs\n', 'utf8');
+
+    const config = inferConfig(dir);
+
+    expect(config).not.toBeNull();
+    expect(config.targets).toEqual(['claude', 'opencode']);
+  });
+
+  it('does not infer opencode when real codex artifacts are present', () => {
+    const dir = join(FIXTURES_DIR, 'config-infer-codex-not-opencode');
+    mkdirSync(join(dir, '.claude', 'skills'), { recursive: true });
+    mkdirSync(join(dir, '.agents', 'skills'), { recursive: true });
+    writeFileSync(join(dir, 'AGENTS.md'), '# docs\n', 'utf8');
+
+    const config = inferConfig(dir);
+
+    expect(config.targets).toEqual(['claude', 'codex']);
+    expect(config.targets).not.toContain('opencode');
   });
 
   it('recovers missing .aspens.json and persists inferred targets', () => {

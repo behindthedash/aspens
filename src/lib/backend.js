@@ -28,6 +28,13 @@ export const BACKENDS = {
     detectArgs: '--version',
     installUrl: 'https://github.com/openai/codex',
   },
+  opencode: {
+    id: 'opencode',
+    label: 'OpenCode CLI',
+    command: 'opencode',
+    detectArgs: '--version',
+    installUrl: 'https://opencode.ai',
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -51,13 +58,25 @@ function isCommandAvailable(command, args) {
 
 /**
  * Detect which backends are installed.
- * @returns {{ claude: boolean, codex: boolean }}
+ * @returns {Record<string, boolean>}
  */
 export function detectAvailableBackends() {
-  return {
-    claude: isCommandAvailable(BACKENDS.claude.command, BACKENDS.claude.detectArgs),
-    codex: isCommandAvailable(BACKENDS.codex.command, BACKENDS.codex.detectArgs),
-  };
+  const result = {};
+  for (const [id, backend] of Object.entries(BACKENDS)) {
+    result[id] = isCommandAvailable(backend.command, backend.detectArgs);
+  }
+  return result;
+}
+
+/**
+ * True if any known backend is available — derived from BACKENDS so a new
+ * backend (e.g. a future 4th CLI) doesn't need every `available.<id>` call
+ * site updated by hand to notice it.
+ * @param {Record<string, boolean>} available
+ * @returns {boolean}
+ */
+export function hasAnyBackend(available) {
+  return Object.keys(BACKENDS).some(id => available[id]);
 }
 
 // ---------------------------------------------------------------------------
@@ -100,9 +119,9 @@ export function resolveBackend({ backendFlag, targetId, available }) {
       return { backend: matchingBackend, warning: null };
     }
 
-    // Matching backend not available — fall back to the other
-    const fallbackId = targetId === 'claude' ? 'codex' : 'claude';
-    if (available[fallbackId]) {
+    // Matching backend not available — fall back to the best available
+    const fallbackId = Object.keys(BACKENDS).find(id => id !== targetId && available[id]);
+    if (fallbackId) {
       const fallback = BACKENDS[fallbackId];
       const missing = BACKENDS[targetId];
       return {
@@ -112,14 +131,16 @@ export function resolveBackend({ backendFlag, targetId, available }) {
     }
   }
 
-  // No target preference or target is 'all' — use whatever is available
+  // No target preference or target is 'all' — use whatever is available (prefer claude, then codex, then opencode)
   if (available.claude) return { backend: BACKENDS.claude, warning: null };
   if (available.codex) return { backend: BACKENDS.codex, warning: null };
+  if (available.opencode) return { backend: BACKENDS.opencode, warning: null };
 
-  // Neither available
+  // None available
+  const installLines = Object.values(BACKENDS)
+    .map(b => `  Install ${b.label}: ${b.installUrl}`)
+    .join('\n');
   throw new Error(
-    'aspens requires either Claude CLI or Codex CLI.\n' +
-    `  Install Claude CLI: ${BACKENDS.claude.installUrl}\n` +
-    `  Install Codex CLI: ${BACKENDS.codex.installUrl}`
+    'aspens requires Claude CLI, Codex CLI, or OpenCode CLI.\n' + installLines
   );
 }

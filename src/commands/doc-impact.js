@@ -2,7 +2,7 @@ import { resolve } from 'path';
 import pc from 'picocolors';
 import * as p from '@clack/prompts';
 import { analyzeImpact, summarizeValueComparison } from '../lib/impact.js';
-import { detectAvailableBackends, resolveBackend } from '../lib/backend.js';
+import { detectAvailableBackends, hasAnyBackend, resolveBackend } from '../lib/backend.js';
 import { loadPrompt, runLLM } from '../lib/runner.js';
 import { CliError } from '../lib/errors.js';
 import { docInitCommand } from './doc-init.js';
@@ -51,7 +51,7 @@ export async function docImpactCommand(path, options) {
 
   let analysis = null;
   const available = detectAvailableBackends();
-  if (available.claude || available.codex) {
+  if (hasAnyBackend(available)) {
     const { backend, warning } = resolveBackend({
       backendFlag: options.backend,
       available,
@@ -77,7 +77,7 @@ export async function docImpactCommand(path, options) {
       p.log.warn(err.message);
     }
   } else {
-    p.log.warn('Impact interpretation unavailable: install Claude CLI or Codex CLI to enable it.');
+    p.log.warn('Impact interpretation unavailable: install Claude CLI, Codex CLI, or OpenCode CLI to enable it.');
   }
 
   for (const target of report.targets) {

@@ -5,7 +5,7 @@ triggers:
   alwaysActivate: true
 ---
 
-You are working in **aspens** — a CLI that keeps coding-agent context accurate as your codebase changes. Scans repos, generates project-specific instructions and skills for Claude Code and Codex CLI, and keeps them fresh.
+You are working in **aspens** — a CLI that keeps coding-agent context accurate as your codebase changes. Scans repos, generates project-specific instructions and skills for Claude Code, Codex, and OpenCode CLI, and keeps them fresh.
 
 ## Tech Stack
 Node.js 20+ (ESM) | Commander | Vitest | es-module-lexer | @clack/prompts | picocolors
@@ -14,7 +14,7 @@ Node.js 20+ (ESM) | Commander | Vitest | es-module-lexer | @clack/prompts | pico
 - `npm test` — Run vitest suite
 - `npm start` / `node bin/cli.js` — Run CLI
 - `aspens scan [path]` — Deterministic repo analysis (no LLM)
-- `aspens doc init [path]` — Generate skills + hooks + CLAUDE.md (`--target claude|codex|all`, `--recommended` for full recommended setup)
+- `aspens doc init [path]` — Generate skills + hooks + CLAUDE.md (`--target claude|codex|opencode`, `--recommended` for full recommended setup)
 - `aspens doc impact [path]` — Show freshness, coverage, and drift of generated context (`--apply` for auto-repair, `--backend`/`--model`/`--timeout`/`--verbose` for LLM interpretation)
 - `aspens doc sync [path]` — Incremental skill updates from git diffs
 - `aspens doc graph [path]` — Rebuild import graph cache (`.claude/graph.json`)

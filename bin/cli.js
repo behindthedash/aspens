@@ -53,7 +53,6 @@ function showWelcome() {
     ${pc.green('aspens doc init --recommended')}     Install the full recommended setup
     ${pc.green('aspens doc init --dry-run')}         Preview without writing
     ${pc.green('aspens doc init --mode chunked')}    One domain at a time (large repos)
-    ${pc.green('aspens doc init --target all')}      Generate Claude + Codex docs together
     ${pc.green('aspens doc init --model haiku')}     Use a specific backend model
     ${pc.green('aspens doc init --verbose')}         See backend activity in real time
     ${pc.green('aspens doc sync')}                   Update generated docs from recent commits
@@ -79,7 +78,7 @@ function showWelcome() {
     ${pc.yellow('--force')}            Overwrite existing files     ${pc.yellow('--model')} ${pc.dim('<m>')}   Choose backend model
     ${pc.yellow('--mode')} ${pc.dim('<mode>')}       all, chunked, base-only     ${pc.yellow('--timeout')} ${pc.dim('<s>')}  Seconds per call
     ${pc.yellow('--strategy')} ${pc.dim('<s>')}    improve, rewrite, skip      ${pc.yellow('--json')}      JSON output (scan)
-    ${pc.yellow('--target')} ${pc.dim('<t>')}       claude, codex, all          ${pc.yellow('--backend')} ${pc.dim('<b>')} Generate with claude or codex
+    ${pc.yellow('--target')} ${pc.dim('<t>')}       claude, codex, opencode      ${pc.yellow('--backend')} ${pc.dim('<b>')} claude, codex, or opencode
     ${pc.yellow('--no-hooks')}         Skip Claude hook installation ${pc.yellow('--hooks-only')}  Update Claude hooks only
     ${pc.yellow('--no-graph')}         Skip import graph analysis
 
@@ -88,9 +87,11 @@ function showWelcome() {
     ${pc.dim('$')} aspens doc impact                        ${pc.dim('2. Verify health + discover optional upgrades')}
 
   ${pc.bold('Target Notes')}
-    ${pc.dim('Claude:')} ${pc.cyan('CLAUDE.md + .claude/skills + hooks')}
-    ${pc.dim('Codex: ')} ${pc.cyan('AGENTS.md + .agents/skills + directory AGENTS.md')}
-    ${pc.dim('Hooks are Claude-only today. Codex is instruction-file driven.')}
+    ${pc.dim('Claude:  ')} ${pc.cyan('CLAUDE.md + .claude/skills + hooks')}
+    ${pc.dim('Codex:   ')} ${pc.cyan('AGENTS.md + .agents/skills + directory AGENTS.md')}
+    ${pc.dim('OpenCode:')} ${pc.cyan('AGENTS.md + .claude/skills')}
+    ${pc.dim('Hooks are Claude-only today. Codex and OpenCode are instruction-file driven.')}
+    ${pc.dim('Codex and OpenCode both write AGENTS.md — combine each with Claude, not with each other.')}
 
   ${pc.dim('Run')} ${pc.cyan('aspens <command> --help')} ${pc.dim('for detailed usage.')}
 
@@ -163,8 +164,9 @@ doc
   .option('--no-hooks', 'Skip Claude hook/rules/settings installation')
   .option('--hooks-only', 'Skip doc generation, just install/update Claude hooks')
   .option('--no-graph', 'Skip import graph analysis')
-  .option('--target <target>', 'Output target: claude, codex, all')
-  .option('--backend <backend>', 'Generation backend: claude, codex (default: matches target)')
+  .option('--target <target>', 'Output target: claude, codex, opencode')
+  .option('--backend <backend>', 'Generation backend: claude, codex, opencode (default: matches target)')
+  .option('--yes', 'Answer yes to write/hook confirmation prompts (for CI/scripted use)')
   .action(docInitCommand);
 
 doc
@@ -190,7 +192,7 @@ doc
   .description('Show generated context freshness and coverage')
   .argument('[path]', 'Path to repo', '.')
   .option('--apply', 'Apply recommended fixes after confirmation')
-  .option('--backend <backend>', 'Interpretation backend: claude, codex (default: whichever is available)')
+  .option('--backend <backend>', 'Interpretation backend: claude, codex, opencode (default: whichever is available)')
   .option('--model <model>', 'Model to use for impact interpretation')
   .option('--timeout <seconds>', 'Backend timeout in seconds', parseTimeout, 300)
   .option('--verbose', 'Show backend reads/activity in real time')

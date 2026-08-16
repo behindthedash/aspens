@@ -17,7 +17,7 @@ You started with 50 clean lines. Three months later it's 200, and Claude ignores
 
 aspens replaces the monolith with scoped skill files (~35 lines each) generated from your actual import graph. Each skill activates only when the agent touches that part of the codebase. A post-commit hook keeps them in sync automatically. The agent reads 35 focused lines instead of 200 sprawling ones, and actually follows them.
 
-Works with Claude Code, Codex, or both.
+Works with Claude Code, Codex, or OpenCode.
 
 ## Install
 
@@ -98,7 +98,7 @@ Aspens supports multiple agent environments through output targets:
 
 - `claude`: `CLAUDE.md` + `.claude/skills` + Claude hooks
 - `codex`: `AGENTS.md` + `.agents/skills` + directory `AGENTS.md`
-- `all`: generate both sets together
+- `opencode`: `AGENTS.md` + `.claude/skills`
 - we are working on adding more agents and tools - ask or contribute!
 
 ## Commands
@@ -140,8 +140,8 @@ $ aspens doc init
 | `--no-graph` | Skip import graph analysis |
 | `--model <model>` | Model for the selected backend |
 | `--verbose` | Show backend reads/activity in real time |
-| `--target <target>` | Output target: `claude`, `codex`, or `all` |
-| `--backend <backend>` | Generation backend: `claude` or `codex` |
+| `--target <target>` | Output target: `claude`, `codex`, or `opencode` |
+| `--backend <backend>` | Generation backend: `claude`, `codex`, or `opencode` |
 
 ### `aspens doc impact`
 
@@ -258,6 +258,7 @@ aspens save-tokens --remove      # Uninstall
 - At least one supported agent CLI:
   - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) — `npm install -g @anthropic-ai/claude-code`
   - Codex CLI
+  - [OpenCode CLI](https://opencode.ai)
 
 ## License
 

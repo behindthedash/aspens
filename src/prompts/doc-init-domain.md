@@ -1,6 +1,6 @@
 Generate ONE skill file for the **{{domainName}}** domain. Use Read/Glob/Grep to explore the actual source files before writing.
 
-{{preservation-contract}}
+{{preservation-contract-refresh}}
 
 {{skill-format}}
 

@@ -616,3 +616,46 @@ describe('sanitizeCodexInstructions (via transformForTarget) — CLAUDE.md menti
     expect(agents.content).not.toContain('CLAUDE.md');
   });
 });
+
+// Regression: transformToCentralized (used for opencode, a centralized-
+// placement target) never stripped Claude-Code-only content the way the
+// directory-scoped codex transform does, even though opencode declares the
+// same unsupported-feature profile (supportsHooks/supportsSettings: false).
+describe('centralized transform (opencode) strips Claude-Code-only content', () => {
+  it('drops hook/skill-rules mentions from CLAUDE.md content projected to opencode', () => {
+    const files = [
+      { path: '.claude/skills/base/skill.md', content: '---\nname: base\n---\n\nBase.\n' },
+      {
+        path: 'CLAUDE.md',
+        content: [
+          '# Project',
+          '',
+          'This repo uses Claude Code hooks for automation.',
+          'See .claude/hooks/pre-commit.sh and skill-rules.json for details.',
+          '',
+          '## Notes',
+          '',
+          'Regular project conventions live here.',
+        ].join('\n'),
+      },
+    ];
+
+    const result = transformForTarget(files, TARGETS.claude, TARGETS.opencode, { scanResult: { domains: [] } });
+    const agents = result.find(f => f.path === 'AGENTS.md');
+    expect(agents).toBeDefined();
+    expect(agents.content).not.toContain('Claude Code');
+    expect(agents.content).not.toContain('skill-rules.json');
+    expect(agents.content).not.toContain('.claude/hooks');
+    expect(agents.content).toContain('Regular project conventions live here.');
+  });
+
+  it('does not strip Claude-Code content when projecting to claude itself', () => {
+    // transformForTarget short-circuits when source === dest, but this
+    // guards against the strip logic ever being misapplied to claude.
+    const files = [
+      { path: 'CLAUDE.md', content: 'Uses Claude Code hooks and skill-rules.json.\n' },
+    ];
+    const result = transformForTarget(files, TARGETS.claude, TARGETS.claude, {});
+    expect(result[0].content).toContain('Claude Code hooks and skill-rules.json');
+  });
+});

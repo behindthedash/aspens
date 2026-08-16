@@ -26,10 +26,19 @@ export function transformForTarget(files, sourceTarget, destTarget, context) {
 }
 
 function transformToCentralized(files, sourceTarget, destTarget) {
-  return files.map(file => ({
-    path: remapCentralizedPath(file.path, sourceTarget, destTarget),
-    content: remapContentPaths(file.content, sourceTarget, destTarget),
-  }));
+  return files.map(file => {
+    let content = remapContentPaths(file.content, sourceTarget, destTarget);
+    // Instructions-file content generated for a hooks/settings-capable
+    // source (Claude) can reference Claude-Code-only features that have no
+    // analogue on a dest target that supports none of them (e.g. opencode).
+    if (file.path === sourceTarget.instructionsFile && !destTarget.supportsHooks && !destTarget.supportsSettings && !destTarget.supportsMCP) {
+      content = stripUnsupportedFeatureContent(content);
+    }
+    return {
+      path: remapCentralizedPath(file.path, sourceTarget, destTarget),
+      content,
+    };
+  });
 }
 
 function remapCentralizedPath(filePath, sourceTarget, destTarget) {
@@ -571,12 +580,16 @@ function remapContentPaths(content, sourceTarget, destTarget) {
   return result;
 }
 
-function sanitizeCodexInstructions(content) {
-  // Line-level drops are reserved for content that has no analogue in AGENTS.md
-  // (Claude Code hooks, skill-rules.json, customize-agents). Generic `CLAUDE.md`
-  // mentions are rewritten by the substitution pass below, not dropped — line-
-  // level filtering on `CLAUDE.md` deletes self-documenting context that the
-  // substitution would have handled correctly.
+// Line-level drops are reserved for content that has no analogue for a
+// target that doesn't support hooks/settings/MCP (Claude Code hooks,
+// skill-rules.json, customize-agents). Generic `CLAUDE.md` mentions are
+// rewritten by each caller's own substitution pass, not dropped here — line-
+// level filtering on `CLAUDE.md` deletes self-documenting context that the
+// substitution would have handled correctly. Shared by codex (directory-
+// scoped) and opencode (centralized) — both declare supportsHooks/
+// supportsSettings/supportsMCP: false, so both need this stripped, but only
+// codex needs the skill-path rewrites that follow in sanitizeCodexInstructions.
+function stripUnsupportedFeatureContent(content) {
   const filteredLines = content
     .split('\n')
     .filter(line =>
@@ -595,9 +608,13 @@ function sanitizeCodexInstructions(content) {
     .replace(/Claude Code skills and AGENTS\.md/g, 'project skills and AGENTS.md')
     .replace(/into their \.claude\/ directories/g, 'into target-specific directories')
     .replace(/into their \.codex\/ directories/g, 'into target-specific directories')
+    .replace(/Claude Code skills plus /g, '');
+}
+
+function sanitizeCodexInstructions(content) {
+  return stripUnsupportedFeatureContent(content)
     .replace(/CLAUDE\.md/g, 'AGENTS.md')
     .replace(/plus `AGENTS\.md`/g, '')
-    .replace(/Claude Code skills plus /g, '')
     .replace(/`base\/skill\.md`/g, '`.agents/skills/base/SKILL.md`')
     .replace(/\bbase\/skill\.md\b/g, '.agents/skills/base/SKILL.md')
     .replace(/(^|[^./A-Za-z0-9_-])`([a-z0-9_-]+)\/skill\.md`/gim, '$1`.agents/skills/$2/SKILL.md`')

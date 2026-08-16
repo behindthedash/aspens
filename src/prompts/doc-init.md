@@ -1,6 +1,6 @@
 Generate concise project context docs for a codebase. Use your tools (Read, Glob, Grep) to explore the actual code before writing anything.
 
-{{preservation-contract}}
+{{preservation-contract-refresh}}
 
 {{skill-format}}
 

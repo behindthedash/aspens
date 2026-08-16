@@ -401,4 +401,147 @@ describe('scanRepo', () => {
       expect(scanRepo(dir).hasClaudeMd).toBe(true);
     });
   });
+
+  // aspenkit/aspens#5
+  describe('CI/CD detection', () => {
+    it('detects GitHub Actions', () => {
+      const dir = createFixture('cicd-gha', {
+        'package.json': '{}',
+        '.github/workflows/ci.yml': 'name: CI',
+      });
+      expect(scanRepo(dir).cicd).toContain('github-actions');
+    });
+
+    it('detects GitLab CI', () => {
+      const dir = createFixture('cicd-gitlab', {
+        'package.json': '{}',
+        '.gitlab-ci.yml': 'stages: [test]',
+      });
+      expect(scanRepo(dir).cicd).toContain('gitlab-ci');
+    });
+
+    it('detects CircleCI', () => {
+      const dir = createFixture('cicd-circleci', {
+        'package.json': '{}',
+        '.circleci/config.yml': 'version: 2.1',
+      });
+      expect(scanRepo(dir).cicd).toContain('circleci');
+    });
+
+    it('returns empty for no CI/CD', () => {
+      const dir = createFixture('cicd-none', {
+        'package.json': '{}',
+      });
+      expect(scanRepo(dir).cicd).toEqual([]);
+    });
+  });
+
+  // aspenkit/aspens#6 — scoped to the tools our own repos actually use
+  describe('database tool detection', () => {
+    it('detects Alembic', () => {
+      const dir = createFixture('db-alembic', {
+        'package.json': '{}',
+        'alembic.ini': '[alembic]',
+      });
+      expect(scanRepo(dir).database).toContain('alembic');
+    });
+
+    it('detects Drizzle via config file', () => {
+      const dir = createFixture('db-drizzle', {
+        'package.json': '{}',
+        'drizzle.config.ts': 'export default {}',
+      });
+      expect(scanRepo(dir).database).toContain('drizzle');
+    });
+
+    it('returns empty when neither tool is present', () => {
+      const dir = createFixture('db-none', {
+        'package.json': '{}',
+      });
+      expect(scanRepo(dir).database).toEqual([]);
+    });
+  });
+
+  // aspenkit/aspens#7
+  describe('API spec detection', () => {
+    it('detects OpenAPI spec at root', () => {
+      const dir = createFixture('api-openapi', {
+        'package.json': '{}',
+        'openapi.yaml': 'openapi: "3.0.0"',
+      });
+      expect(scanRepo(dir).apiSpecs).toContain('openapi');
+    });
+
+    it('detects GraphQL schema', () => {
+      const dir = createFixture('api-graphql', {
+        'package.json': '{}',
+        'src/schema.graphql': 'type Query { hello: String }',
+      });
+      expect(scanRepo(dir).apiSpecs).toContain('graphql');
+    });
+
+    it('detects protobuf', () => {
+      const dir = createFixture('api-proto', {
+        'package.json': '{}',
+        'proto/service.proto': 'syntax = "proto3";',
+      });
+      expect(scanRepo(dir).apiSpecs).toContain('protobuf');
+    });
+
+    it('returns empty when no API specs present', () => {
+      const dir = createFixture('api-none', {
+        'package.json': '{}',
+      });
+      expect(scanRepo(dir).apiSpecs).toEqual([]);
+    });
+  });
+
+  // aspenkit/aspens#8
+  describe('Next.js architecture probing', () => {
+    it('detects App Router with route/component counts', () => {
+      const dir = createFixture('nextjs-app-router', {
+        'package.json': '{"dependencies":{"next":"^15.0.0"}}',
+        'app/layout.tsx': 'export default function Layout() {}',
+        'app/page.tsx': 'export default function Home() {}',
+        'app/about/page.tsx': 'export default function About() {}',
+        'app/dashboard/page.tsx': "'use client'\nexport default function Dashboard() {}",
+        'app/api/users/route.ts': 'export async function GET() {}',
+      });
+      const scan = scanRepo(dir);
+      expect(scan.nextjsArchitecture.router).toBe('app');
+      expect(scan.nextjsArchitecture.routes).toBe(3);
+      expect(scan.nextjsArchitecture.apiRoutes).toBe(1);
+      expect(scan.nextjsArchitecture.clientComponents).toBe(1);
+    });
+
+    it('detects Pages Router', () => {
+      const dir = createFixture('nextjs-pages-router', {
+        'package.json': '{"dependencies":{"next":"^15.0.0"}}',
+        'pages/index.tsx': 'export default function Home() {}',
+        'pages/about.tsx': 'export default function About() {}',
+        'pages/api/users.ts': 'export default function handler() {}',
+        'pages/_app.tsx': 'export default function App() {}',
+      });
+      const scan = scanRepo(dir);
+      expect(scan.nextjsArchitecture.router).toBe('pages');
+      expect(scan.nextjsArchitecture.routes).toBe(2);
+      expect(scan.nextjsArchitecture.apiRoutes).toBe(1);
+    });
+
+    it('detects middleware presence', () => {
+      const dir = createFixture('nextjs-middleware', {
+        'package.json': '{"dependencies":{"next":"^15.0.0"}}',
+        'app/layout.tsx': 'export default function Layout() {}',
+        'middleware.ts': 'export function middleware() {}',
+      });
+      expect(scanRepo(dir).nextjsArchitecture.hasMiddleware).toBe(true);
+    });
+
+    it('does not run for non-Next.js repos', () => {
+      const dir = createFixture('not-nextjs', {
+        'package.json': '{"dependencies":{"react":"^18.0.0"}}',
+      });
+      expect(scanRepo(dir).nextjsArchitecture).toBeUndefined();
+    });
+  });
 });

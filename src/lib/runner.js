@@ -1,5 +1,5 @@
 import { execSync, spawn } from 'child_process';
-import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, rmSync } from 'fs';
 import { join, dirname, normalize, resolve, relative, sep } from 'path';
 import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
@@ -158,6 +158,15 @@ export function runLLM(prompt, options = {}, backendId = 'claude') {
       cwd: options.cwd,
     });
   }
+  if (backendId === 'opencode') {
+    return runOpenCode(prompt, {
+      timeout: options.timeout,
+      verbose: options.verbose,
+      onActivity: options.onActivity,
+      model: options.model,
+      cwd: options.cwd,
+    });
+  }
   return runClaude(prompt, options);
 }
 
@@ -266,6 +275,154 @@ export function runCodex(prompt, options = {}) {
     } else {
       child.stdin.end();
     }
+  });
+}
+
+/**
+ * Execute a prompt via OpenCode CLI (opencode run).
+ * Uses --format json for structured event output.
+ * Returns { text, usage } matching runClaude's interface.
+ */
+export function runOpenCode(prompt, options = {}) {
+  const { timeout = 300000, verbose = false, onActivity = null, model = null, cwd = null } = options;
+
+  // Write prompt to temp file for long prompts
+  const promptFile = join(tmpdir(), `aspens-opencode-prompt-${Date.now()}.md`);
+  writeFileSync(promptFile, prompt, 'utf8');
+
+  // model is spawned through a shell on Windows (see below) — reject
+  // anything outside a safe model-id charset before it can reach argv.
+  if (model && !/^[A-Za-z0-9_.\-/:]+$/.test(model)) {
+    throw new Error(`Invalid --model value for OpenCode: ${model}`);
+  }
+
+  // The message must precede `-f` — `-f`/`--file` is a yargs array-type
+  // option, so a bare positional placed after it gets swallowed into the
+  // file array instead of being treated as the message.
+  const args = [
+    'run',
+    'Generate repo documentation based on the attached prompt file',
+    '--format', 'json',
+    '-f', promptFile,
+  ];
+  if (model) args.push('--model', model);
+  // Resolve to an absolute path: runOpenCode is exported and may receive a
+  // relative cwd, and on Windows this value is spawned through a shell.
+  if (cwd) args.push('--dir', resolve(cwd));
+
+  const cleanupPromptFile = () => {
+    try { rmSync(promptFile, { force: true }); } catch { /* ignore */ }
+  };
+
+  return new Promise((resolve, reject) => {
+    // Unlike runClaude/runCodex, the prompt is passed via -f (a file), not
+    // stdin — an open, never-written, never-closed stdin pipe makes
+    // `opencode run` hang indefinitely before it even starts (confirmed:
+    // `sleep 999 | opencode run ...` never gets past its init phase).
+    // 'ignore' means no stdin pipe exists at all.
+    const child = spawn('opencode', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: process.platform === 'win32',
+    });
+
+    const chunks = [];
+    const errChunks = [];
+    // Keyed by part.id: a "text" event carries the full accumulated text
+    // for that part (not a delta), and later events for the same id replace
+    // earlier ones. Distinct part ids are separate text blocks, joined in
+    // first-seen order.
+    const textPartsById = new Map();
+    let usage = { output_tokens: 0, tool_uses: 0, tool_result_chars: 0 };
+    let lineBuffer = '';
+    // Latches true on the first non-empty text part — a part's text only
+    // grows across streamed updates for the same id, never shrinks back to
+    // empty, so once this is true `combined` at close time is guaranteed
+    // non-empty and the raw-output fallback can never fire.
+    let hasRealText = false;
+
+    function processOpenCodeLine(line) {
+      if (!line.trim()) return;
+      try {
+        const event = JSON.parse(line);
+        const part = event.part;
+        if (event.type === 'text' && part?.type === 'text' && typeof part.text === 'string') {
+          textPartsById.set(part.id, part.text);
+          if (part.text.length > 0) hasRealText = true;
+        }
+        if ((event.type === 'step_finish' || event.type === 'step-finish') && part?.tokens) {
+          usage.output_tokens = part.tokens.output || 0;
+        }
+        if (event.type === 'tool' || part?.type === 'tool') {
+          usage.tool_uses++;
+        }
+        if (verbose && onActivity) {
+          if (event.type === 'step_start') {
+            onActivity('OpenCode thinking...');
+          }
+        }
+      } catch { /* not JSON */ }
+    }
+
+    child.stdout.on('data', (data) => {
+      // `chunks` only feeds the raw-output fallback below, which triggers
+      // when combined text ends up empty. Once real (non-empty) text has
+      // been seen, the fallback can't fire, so stop duplicating the buffer.
+      if (!hasRealText) {
+        chunks.push(data);
+      }
+      // Parse JSON events for text content — buffer across chunks since a
+      // record can span multiple `data` callbacks.
+      lineBuffer += data.toString('utf8');
+      const lines = lineBuffer.split('\n');
+      lineBuffer = lines.pop();
+      for (const line of lines) processOpenCodeLine(line);
+    });
+
+    child.stderr.on('data', (data) => errChunks.push(data));
+
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      if (process.platform === 'win32' && child.pid) {
+        try { execSync(`taskkill /pid ${child.pid} /t /f`, { stdio: 'ignore' }); } catch { /* ignore */ }
+      } else {
+        child.kill('SIGTERM');
+      }
+    }, timeout);
+
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      if (lineBuffer.trim()) processOpenCodeLine(lineBuffer);
+      cleanupPromptFile();
+
+      if (timedOut || signal === 'SIGTERM' || signal === 'SIGKILL') {
+        reject(new Error(`OpenCode timed out after ${timeout / 1000}s. Try a smaller repo or increase --timeout.`));
+      } else if (code === 0) {
+        const combined = [...textPartsById.values()].join('\n').trim();
+        if (!combined && chunks.length > 0) {
+          // Fallback: try to extract from raw output
+          const raw = Buffer.concat(chunks).toString('utf8');
+          resolve({ text: raw, usage });
+        } else {
+          resolve({ text: combined, usage });
+        }
+      } else if (code === 127) {
+        reject(new Error('OpenCode CLI not found. Install it first: https://opencode.ai'));
+      } else {
+        const stderr = Buffer.concat(errChunks).toString('utf8');
+        if (stderr.includes('rate limit') || stderr.includes('429')) {
+          reject(new Error('OpenCode rate limit hit. Wait a moment and try again.'));
+        } else {
+          reject(new Error(`OpenCode exited with code ${code}${stderr ? ': ' + stderr.slice(0, 500) : ''}`));
+        }
+      }
+    });
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      cleanupPromptFile();
+      reject(new Error(`OpenCode failed to start: ${err.message}. Is OpenCode CLI installed?`));
+    });
   });
 }
 
