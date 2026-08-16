@@ -33,6 +33,21 @@ function autoTimeout(scan, userTimeout) {
   return timeoutMs;
 }
 
+// Non-interactive stdin (no TTY, e.g. worktrail's subprocess.run(capture_output=True))
+// never resolves an @clack/prompts confirm/select — it blocks forever, since @clack
+// has no data and no EOF to react to. Every prompt in this file must resolve via a
+// flag/--yes default, or fail fast here, before ever calling into @clack/prompts.
+function isInteractive() {
+  return Boolean(process.stdin.isTTY);
+}
+
+function failNonInteractive(description) {
+  throw new CliError(
+    `Cannot prompt ("${description}") in a non-interactive session (stdin is not a TTY). ` +
+    'Pass the flag that resolves this choice explicitly (e.g. --yes, --backend, --target, --strategy, --mode) and retry.'
+  );
+}
+
 function makeClaudeOptions(timeoutMs, verbose, model, spinner) {
   return {
     timeout: timeoutMs,
@@ -292,15 +307,21 @@ export async function docInitCommand(path, options) {
     const availableBackends = Object.keys(available).filter(id => available[id]);
     let backendChoice;
     if (availableBackends.length > 1) {
-      backendChoice = await p.select({
-        message: 'Which AI should generate the docs?',
-        options: availableBackends.map(id => ({
-          value: id,
-          label: BACKENDS[id].label,
-          hint: `uses ${BACKENDS[id].label}`,
-        })),
-      });
-      if (p.isCancel(backendChoice)) { p.cancel('Aborted'); return; }
+      if (options.yes) {
+        backendChoice = availableBackends[0];
+      } else if (!isInteractive()) {
+        failNonInteractive('which AI should generate the docs');
+      } else {
+        backendChoice = await p.select({
+          message: 'Which AI should generate the docs?',
+          options: availableBackends.map(id => ({
+            value: id,
+            label: BACKENDS[id].label,
+            hint: `uses ${BACKENDS[id].label}`,
+          })),
+        });
+        if (p.isCancel(backendChoice)) { p.cancel('Aborted'); return; }
+      }
     } else {
       backendChoice = availableBackends[0];
     }
@@ -328,17 +349,23 @@ export async function docInitCommand(path, options) {
     // gates backend selection only, in Step 1.)
     const targetChoiceIds = Object.keys(TARGETS);
     if (targetChoiceIds.length > 1) {
-      const selected = await p.multiselect({
-        message: 'Generate docs for which coding agents?',
-        options: targetChoiceIds.map(id => ({
-          value: id,
-          label: TARGETS[id].label,
-        })),
-        initialValues: [backend.id], // pre-select the target matching the backend
-        required: true,
-      });
-      if (p.isCancel(selected)) { p.cancel('Aborted'); return; }
-      targetIds = selected;
+      if (options.yes) {
+        targetIds = [backend.id]; // same default this prompt pre-selects interactively
+      } else if (!isInteractive()) {
+        failNonInteractive('generate docs for which coding agents');
+      } else {
+        const selected = await p.multiselect({
+          message: 'Generate docs for which coding agents?',
+          options: targetChoiceIds.map(id => ({
+            value: id,
+            label: TARGETS[id].label,
+          })),
+          initialValues: [backend.id], // pre-select the target matching the backend
+          required: true,
+        });
+        if (p.isCancel(selected)) { p.cancel('Aborted'); return; }
+        targetIds = selected;
+      }
     } else {
       targetIds = [backend.id];
     }
@@ -426,8 +453,10 @@ export async function docInitCommand(path, options) {
   );
   let skipDiscovery = false;
   if (hasExistingDocs && !isBaseOnly && !isDomainsOnly && options.strategy !== 'rewrite') {
-    if (recommended) {
-      skipDiscovery = true;
+    if (recommended || options.yes) {
+      skipDiscovery = true; // matches this prompt's own initialValue: true
+    } else if (!isInteractive()) {
+      failNonInteractive('skip discovery and reuse existing domains');
     } else {
       const existingSource = hasClaudeDocs && hasCodexDocs ? 'Claude + Codex'
         : hasClaudeDocs ? 'Claude' : 'Codex';
@@ -581,22 +610,28 @@ export async function docInitCommand(path, options) {
       existingMsg = 'Existing AGENTS.md detected. How to proceed:';
     }
 
-    const strategyOptions = [
-      { value: 'improve', label: 'Improve existing (recommended)', hint: hasClaudeDocs && isCodexTarget && !hasCodexDocs ? 'reuse Claude docs as context for Codex' : 'read current docs, update based on actual code' },
-      { value: 'rewrite', label: 'Rewrite from scratch', hint: 'ignore existing, generate fresh' },
-      { value: 'skip-existing', label: 'Keep existing, skip', hint: 'only generate skills for new domains' },
-    ];
+    if (options.yes) {
+      existingDocsStrategy = 'improve'; // the "(recommended)" option below
+    } else if (!isInteractive()) {
+      failNonInteractive(existingMsg);
+    } else {
+      const strategyOptions = [
+        { value: 'improve', label: 'Improve existing (recommended)', hint: hasClaudeDocs && isCodexTarget && !hasCodexDocs ? 'reuse Claude docs as context for Codex' : 'read current docs, update based on actual code' },
+        { value: 'rewrite', label: 'Rewrite from scratch', hint: 'ignore existing, generate fresh' },
+        { value: 'skip-existing', label: 'Keep existing, skip', hint: 'only generate skills for new domains' },
+      ];
 
-    const strategy = await p.select({
-      message: existingMsg,
-      options: strategyOptions,
-    });
+      const strategy = await p.select({
+        message: existingMsg,
+        options: strategyOptions,
+      });
 
-    if (p.isCancel(strategy)) {
-      p.cancel('Aborted');
-      return;
+      if (p.isCancel(strategy)) {
+        p.cancel('Aborted');
+        return;
+      }
+      existingDocsStrategy = strategy;
     }
-    existingDocsStrategy = strategy;
 
     if (existingDocsStrategy === 'skip-existing') {
       p.log.info('Keeping existing docs. Will only generate skills for new domains.');
@@ -645,40 +680,46 @@ export async function docInitCommand(path, options) {
     const chunkedCalls = domainCount + 2; // base + N domains + instructions file
     const backendName = _backendId === 'codex' ? 'Codex' : 'Claude';
 
-    const modeChoice = await p.select({
-      message: `${domainCount} domains detected. Generate skills:`,
-      initialValue: defaultMode,
-      options: [
-        { value: 'all-at-once', label: 'All at once', hint: isLarge ? 'may timeout on this repo — 1 call' : `faster — 1 ${backendName} call` },
-        { value: 'chunked', label: 'One domain at a time', hint: `reliable — ${chunkedCalls} ${backendName} calls` },
-        { value: 'pick', label: 'Pick specific domains', hint: 'choose which domains to generate' },
-        { value: 'base-only', label: isCodexPrimary() ? 'Root AGENTS only' : 'Base skill only', hint: `2 ${backendName} calls` },
-      ],
-    });
-
-    if (p.isCancel(modeChoice)) {
-      p.cancel('Aborted');
-      return;
-    }
-    mode = modeChoice;
-
-    if (mode === 'pick') {
-      const picked = await p.multiselect({
-        message: 'Select domains:',
-        options: effectiveDomains.map(d => ({
-          value: d.name,
-          label: d.name,
-          hint: d.description || d.directories?.join(', ') || d.files?.slice(0, 2).join(', '),
-        })),
-        required: true,
+    if (options.yes) {
+      mode = defaultMode;
+    } else if (!isInteractive()) {
+      failNonInteractive(`${domainCount} domains detected — choose generation mode`);
+    } else {
+      const modeChoice = await p.select({
+        message: `${domainCount} domains detected. Generate skills:`,
+        initialValue: defaultMode,
+        options: [
+          { value: 'all-at-once', label: 'All at once', hint: isLarge ? 'may timeout on this repo — 1 call' : `faster — 1 ${backendName} call` },
+          { value: 'chunked', label: 'One domain at a time', hint: `reliable — ${chunkedCalls} ${backendName} calls` },
+          { value: 'pick', label: 'Pick specific domains', hint: 'choose which domains to generate' },
+          { value: 'base-only', label: isCodexPrimary() ? 'Root AGENTS only' : 'Base skill only', hint: `2 ${backendName} calls` },
+        ],
       });
 
-      if (p.isCancel(picked)) {
+      if (p.isCancel(modeChoice)) {
         p.cancel('Aborted');
         return;
       }
-      selectedDomains = effectiveDomains.filter(d => picked.includes(d.name));
-      mode = 'chunked';
+      mode = modeChoice;
+
+      if (mode === 'pick') {
+        const picked = await p.multiselect({
+          message: 'Select domains:',
+          options: effectiveDomains.map(d => ({
+            value: d.name,
+            label: d.name,
+            hint: d.description || d.directories?.join(', ') || d.files?.slice(0, 2).join(', '),
+          })),
+          required: true,
+        });
+
+        if (p.isCancel(picked)) {
+          p.cancel('Aborted');
+          return;
+        }
+        selectedDomains = effectiveDomains.filter(d => picked.includes(d.name));
+        mode = 'chunked';
+      }
     }
   }
 
@@ -698,6 +739,9 @@ export async function docInitCommand(path, options) {
   }
 
   if (shouldWriteIncrementally && !options.yes) {
+    if (!isInteractive()) {
+      failNonInteractive('allow aspens to write generated files incrementally during chunked generation');
+    }
     console.log();
     const allowIncrementalWrite = await p.confirm({
       message: 'Allow aspens to write generated files incrementally during chunked generation? This includes skills, repo docs, and supported hook/config updates.',
@@ -796,6 +840,9 @@ export async function docInitCommand(path, options) {
 
     // Confirm
     if (!options.yes) {
+      if (!isInteractive()) {
+        failNonInteractive(`write ${allFiles.length} files to ${repoPath}`);
+      }
       const proceed = await p.confirm({
         message: `Write ${allFiles.length} files to ${repoPath}?`,
         initialValue: true,
@@ -890,6 +937,9 @@ export async function docInitCommand(path, options) {
     const hookInstalled = existsSync(hookPath) &&
       readFileSync(hookPath, 'utf8').includes(`aspens doc-sync hook (${toPosixRelative(gitRoot, repoPath) || '.'})`);
     if (!hookInstalled) {
+      if (!isInteractive()) {
+        failNonInteractive('install post-commit hook to keep docs in sync automatically');
+      }
       console.log();
       const wantHook = await p.confirm({
         message: 'Install post-commit hook to keep docs in sync automatically?',
@@ -1626,6 +1676,10 @@ async function generateAllAtOnce(repoPath, scan, repoGraph, selectedDomains, tim
     if (nonInteractive || isTimeout) {
       p.log.info('Falling back to chunked mode (one domain at a time)...');
       return generateChunked(repoPath, scan, repoGraph, selectedDomains, false, timeoutMs, strategy, verbose, model, findings);
+    }
+
+    if (!isInteractive()) {
+      failNonInteractive('try chunked mode instead');
     }
 
     const retry = await p.confirm({
