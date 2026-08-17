@@ -13,7 +13,7 @@ import { CliError } from '../lib/errors.js';
 import { resolveTimeout } from '../lib/timeout.js';
 import { TARGETS, resolveTarget, getAllowedPaths, writeConfig, loadConfig, mergeConfiguredTargets } from '../lib/target.js';
 import { BACKENDS, detectAvailableBackends, resolveBackend } from '../lib/backend.js';
-import { transformForTarget, validateTransformedFiles, ensureRootKeyFilesSection, syncSkillsSection, syncBehaviorSection } from '../lib/target-transform.js';
+import { transformForTarget, validateTransformedFiles, ensureRootKeyFilesSection, collectSkillsForList, ensureAspensImportBlock, buildAspensIndexContent, ASPENS_INDEX_PATH } from '../lib/target-transform.js';
 import { findSkillFiles } from '../lib/skill-reader.js';
 import { getGitRoot, getGitCommonDir } from '../lib/git-helpers.js';
 import { installSaveTokensRecommended } from './save-tokens.js';
@@ -1948,18 +1948,27 @@ async function generateChunked(repoPath, scan, repoGraph, domains, baseOnly, tim
         claudeMdSpinner.stop(pc.yellow(`${instructionsArtifactLabel()} — failed after retries`));
         p.log.warn(`Could not generate ${instructionsArtifactLabel()}. Try: aspens doc init --strategy rewrite --mode base-only`);
       } else {
-        const claudeSkillsDirPrefix = TARGETS.claude.skillsDir + '/';
         const claudeBaseSkillPrefix = TARGETS.claude.skillsDir + '/base/';
-        const baseSkillForList = allFiles.find(f => f.path.startsWith(claudeBaseSkillPrefix));
-        const domainSkillsForList = allFiles.filter(f =>
-          f.path.startsWith(claudeSkillsDirPrefix) && !f.path.startsWith(claudeBaseSkillPrefix)
+        // Merge on-disk skills with this run's pending ones — mirrors
+        // transformToDirectoryScoped's collectSkillsForList, which the
+        // codex/opencode targets already rely on. Without the on-disk merge,
+        // a partial-retry run (e.g. `--mode base-only` recovering a failed
+        // root-instructions generation, or `--domains X,Y`) only knows about
+        // the skills generated in THIS invocation, so CLAUDE.md's own
+        // `## Skills` section undercounts skills that already exist on disk
+        // from an earlier successful pass.
+        const { baseSkillForList, domainSkillsForList } = collectSkillsForList(
+          allFiles, allFiles.find(f => f.path.startsWith(claudeBaseSkillPrefix)), null, TARGETS.claude, repoPath,
         );
         files = files.map(file => {
           if (file.path !== 'CLAUDE.md') return file;
           let content = ensureRootKeyFilesSection(file.content);
-          content = syncSkillsSection(content, baseSkillForList, domainSkillsForList, TARGETS.claude, false);
-          content = syncBehaviorSection(content);
+          content = ensureAspensImportBlock(content, ASPENS_INDEX_PATH);
           return { ...file, content };
+        });
+        files.push({
+          path: ASPENS_INDEX_PATH,
+          content: buildAspensIndexContent(baseSkillForList, domainSkillsForList, TARGETS.claude, false),
         });
         files = validateGeneratedChunk(files, repoPath);
         allFiles.push(...files);

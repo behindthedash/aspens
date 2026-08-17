@@ -86,7 +86,14 @@ describe('repairDeterministicSections', () => {
     expect(result).toEqual([]);
   });
 
-  it('rewrites CLAUDE.md when the Skills section is stale', () => {
+  // Regression: the claude-target repair path used to inject ## Skills /
+  // ## Behavior content directly into CLAUDE.md. It now maintains a
+  // delimited aspens:start/aspens:end block that imports an aspens-owned
+  // index file instead — see ensureAspensImportBlock/buildAspensIndexContent
+  // in target-transform.js. A pre-existing inline `## Skills` heading (from
+  // an older aspens run) is migrated away rather than left as stale
+  // duplicate content.
+  it('replaces a stale inline Skills section with the delimited import block, and writes the skills list to the aspens-owned index file', () => {
     seedSkillsAndInstructions({
       instructionsContent: [
         '# Test',
@@ -110,9 +117,15 @@ describe('repairDeterministicSections', () => {
 
     expect(result.length).toBeGreaterThan(0);
     const claudeMd = readFileSync(join(fixtureRoot, 'CLAUDE.md'), 'utf8');
-    expect(claudeMd).toContain('.claude/skills/base/skill.md');
-    expect(claudeMd).toContain('.claude/skills/billing/skill.md');
-    expect(claudeMd).toContain('.claude/skills/auth/skill.md');
+    expect(claudeMd).toContain('<!-- aspens:start -->');
+    expect(claudeMd).toContain('@.claude/aspens-index.md');
+    expect(claudeMd).toContain('<!-- aspens:end -->');
     expect(claudeMd).not.toContain('old stale entry');
+    expect(claudeMd).not.toContain('.claude/skills/base/skill.md');
+
+    const indexMd = readFileSync(join(fixtureRoot, '.claude', 'aspens-index.md'), 'utf8');
+    expect(indexMd).toContain('.claude/skills/base/skill.md');
+    expect(indexMd).toContain('.claude/skills/billing/skill.md');
+    expect(indexMd).toContain('.claude/skills/auth/skill.md');
   });
 });
