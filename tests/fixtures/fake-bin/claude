@@ -1,0 +1,14 @@
+#!/usr/bin/env node
+// Fake Claude CLI for the dry-run kill-mid-run regression test
+// (doc-init-dry-run.test.js). `--version` resolves instantly so backend
+// detection succeeds; any other invocation (the real generation call) hangs
+// forever without producing output, so the test can SIGKILL the parent
+// `doc init` process at a known point mid-generation with no network call,
+// no auth, and no timing race against a real LLM response.
+const args = process.argv.slice(2);
+if (args.includes('--version')) {
+  process.stdout.write('1.0.0 (fake)\n');
+  process.exit(0);
+}
+// Never resolves — the test kills the parent process before this matters.
+setInterval(() => {}, 1 << 30);

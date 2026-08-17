@@ -545,8 +545,10 @@ export function persistGraphArtifacts(repoPath, rawGraph, options = {}) {
   const target = options.target;
   const serialized = serializeGraph(rawGraph, repoPath);
 
-  // If target doesn't support graph artifacts, return serialized data without writing
-  if (target?.supportsGraph === false) {
+  // If target doesn't support graph artifacts, or this is a dry run, return
+  // serialized data without writing (dry-run must never touch disk, even for
+  // cache/index artifacts the "files to write" preview never lists).
+  if (target?.supportsGraph === false || options.dryRun) {
     return serialized;
   }
 

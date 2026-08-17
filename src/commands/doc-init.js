@@ -24,10 +24,17 @@ const TEMPLATES_DIR = join(__dirname, '..', 'templates');
 // Read-only tools — Claude explores the repo itself
 const READ_ONLY_TOOLS = ['Read', 'Glob', 'Grep'];
 
-// Auto-scale timeout based on repo size
-function autoTimeout(scan, userTimeout) {
+// Auto-scale timeout based on repo size. OpenCode's tool-calling loop (reads,
+// greps, bash calls) adds wall-clock time on top of model latency that
+// Claude's read-only-tool-restricted calls and Codex's more direct exec mode
+// don't incur the same way, so its size-based default gets a multiplier —
+// only when the user hasn't set --timeout/ASPENS_TIMEOUT explicitly, since
+// resolveTimeout() already lets either of those win outright.
+const OPENCODE_TIMEOUT_MULTIPLIER = 1.5;
+export function autoTimeout(scan, userTimeout, backendId) {
   const sizeDefaults = { 'small': 120, 'medium': 300, 'large': 600, 'very-large': 900 };
-  const fallback = sizeDefaults[scan.size?.category] || 300;
+  let fallback = sizeDefaults[scan.size?.category] || 300;
+  if (backendId === 'opencode') fallback = Math.round(fallback * OPENCODE_TIMEOUT_MULTIPLIER);
   const { timeoutMs, envWarning } = resolveTimeout(userTimeout, fallback);
   if (envWarning) console.warn('Warning: ASPENS_TIMEOUT is not a valid number — using auto-scaled timeout.');
   return timeoutMs;
@@ -69,22 +76,18 @@ function sanitizeInline(content, maxLen = MAX_INLINE_CHARS) {
 }
 
 /**
- * Parse files from LLM output, with Codex fallback.
- * Codex often returns plain markdown without <file> tags.
- * When that happens, wrap the text as the primary target's instructions file.
+ * Parse files from LLM output, with an untagged-text fallback.
+ * Codex and OpenCode both sometimes return plain markdown without <file>
+ * tags. When that happens on a true single-file prompt (one call, one
+ * expected file — the caller must confirm this via `singleFile`, since
+ * wrapping a multi-file response, e.g. generateAllAtOnce's combined prompt,
+ * would stuff the whole response into one file), wrap the raw text as the
+ * expected file.
  */
-function parseLLMOutput(text, allowedPaths, expectedPath) {
+export function parseLLMOutput(text, allowedPaths, expectedPath, singleFile = false) {
   let files = parseFileOutput(text, allowedPaths);
-  const exactFiles = allowedPaths?.exactFiles || [];
-  const dirPrefixes = allowedPaths?.dirPrefixes || [];
-  const isSingleFilePrompt =
-    !!expectedPath &&
-    exactFiles.length === 1 &&
-    exactFiles[0] === expectedPath &&
-    dirPrefixes.length === 0;
 
-  // If no <file> tags found (common with Codex), wrap only for true single-file prompts.
-  if (files.length === 0 && text.trim().length > 50 && expectedPath && isSingleFilePrompt) {
+  if (files.length === 0 && text.trim().length > 50 && expectedPath && singleFile) {
     files = [{ path: expectedPath, content: text.trim() + '\n' }];
   }
   return files;
@@ -408,7 +411,7 @@ export async function docInitCommand(path, options) {
       // Persist graph, code-map skill, and index for runtime use
       // For Codex-only target, this returns serialized data without writing files
       try {
-        graphSerialized = persistGraphArtifacts(repoPath, repoGraph, { target: primaryTarget });
+        graphSerialized = persistGraphArtifacts(repoPath, repoGraph, { target: primaryTarget, dryRun: options.dryRun });
       } catch { /* graph persistence failed — non-fatal */ }
     } catch { /* graph building failed — continue without it */ }
   }
@@ -429,7 +432,7 @@ export async function docInitCommand(path, options) {
   if (repoGraph) {
     console.log(pc.dim('  Import graph: ') + `${repoGraph.stats.totalFiles} files, ${repoGraph.stats.totalEdges} edges`);
   }
-  const timeoutMs = autoTimeout(scan, options.timeout);
+  const timeoutMs = autoTimeout(scan, options.timeout, _backendId);
   if (scan.size) {
     console.log(pc.dim('  Size: ') + `${scan.size.sourceFiles} source files (${scan.size.category})`);
     console.log(pc.dim('  Timeout: ') + `${timeoutMs / 1000}s per call` + (model ? pc.dim(` | Model: ${model}`) : ''));
@@ -1742,7 +1745,7 @@ async function generateChunked(repoPath, scan, repoGraph, domains, baseOnly, tim
   try {
     let { text, usage } = await runLLM(basePrompt, makeClaudeOptions(timeoutMs, verbose, model, baseSpinner), _backendId);
     trackUsage(usage, basePrompt.length);
-    let files = parseLLMOutput(text, _allowedPaths, expectedBasePath);
+    let files = parseLLMOutput(text, _allowedPaths, expectedBasePath, true);
 
     // Retry up to 2 times if LLM didn't produce parseable output
     const MAX_RETRIES = 2;
@@ -1751,7 +1754,7 @@ async function generateChunked(repoPath, scan, repoGraph, domains, baseOnly, tim
       const retryPrompt = `Your previous response did not include the required <file path="...">content</file> XML tags. I need you to output the base skill wrapped in exactly this format:\n\n<file path=".claude/skills/base/skill.md">\n---\nname: base\ndescription: ...\n---\n[skill content]\n</file>\n\nHere is your previous output — please re-wrap it correctly:\n\n${text}`;
       const retry = await runLLM(retryPrompt, makeClaudeOptions(timeoutMs, verbose, model, null), _backendId);
       trackUsage(retry.usage, retryPrompt.length);
-      files = parseLLMOutput(retry.text, _allowedPaths, expectedBasePath);
+      files = parseLLMOutput(retry.text, _allowedPaths, expectedBasePath, true);
       text = retry.text;
     }
 
@@ -1829,7 +1832,7 @@ async function generateChunked(repoPath, scan, repoGraph, domains, baseOnly, tim
           const { text, usage } = await runLLM(domainPrompt, makeClaudeOptions(timeoutMs, verbose, model, null), _backendId);
           trackUsage(usage, domainPrompt.length);
           const expectedDomainPath = `.claude/skills/${domain.name}/skill.md`;
-          const files = parseLLMOutput(text, _allowedPaths, expectedDomainPath);
+          const files = parseLLMOutput(text, _allowedPaths, expectedDomainPath, true);
           return { domain: domain.name, files, success: true };
         } catch {
           return { domain: domain.name, files: [], success: false };
@@ -1912,7 +1915,7 @@ async function generateChunked(repoPath, scan, repoGraph, domains, baseOnly, tim
     try {
       let { text, usage } = await runLLM(claudeMdPrompt, makeClaudeOptions(timeoutMs, verbose, model, claudeMdSpinner), _backendId);
       trackUsage(usage, claudeMdPrompt.length);
-      let files = parseLLMOutput(text, _allowedPaths, 'CLAUDE.md');
+      let files = parseLLMOutput(text, _allowedPaths, 'CLAUDE.md', true);
       let isConversational = files.length > 0 && looksLikeConversationalNonAnswer(files[0].content);
       let isDrasticLoss = files.length > 0 && !isConversational && looksLikeDrasticContentLoss(files[0].content, existingContentLength);
 
@@ -1935,7 +1938,7 @@ async function generateChunked(repoPath, scan, repoGraph, domains, baseOnly, tim
         );
         const retry = await runLLM(retryPrompt, makeClaudeOptions(timeoutMs, verbose, model, null), _backendId);
         trackUsage(retry.usage, retryPrompt.length);
-        files = parseLLMOutput(retry.text, _allowedPaths, 'CLAUDE.md');
+        files = parseLLMOutput(retry.text, _allowedPaths, 'CLAUDE.md', true);
         isConversational = files.length > 0 && looksLikeConversationalNonAnswer(files[0].content);
         isDrasticLoss = files.length > 0 && !isConversational && looksLikeDrasticContentLoss(files[0].content, existingContentLength);
         text = retry.text;
