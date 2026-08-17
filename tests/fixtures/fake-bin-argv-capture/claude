@@ -1,0 +1,22 @@
+#!/usr/bin/env node
+// Fake Claude CLI for runner.test.js's `--tools` vs `--allowedTools` regression.
+// `--version` resolves instantly so backend detection succeeds. Any other
+// invocation records its full argv to the file named by
+// ASPENS_TEST_ARGV_CAPTURE_FILE (so the test can assert on the exact flags
+// passed) and emits a minimal valid stream-json `result` event so runClaude
+// resolves without error.
+import { writeFileSync } from 'fs';
+
+const args = process.argv.slice(2);
+if (args.includes('--version')) {
+  process.stdout.write('1.0.0 (fake)\n');
+  process.exit(0);
+}
+
+const captureFile = process.env.ASPENS_TEST_ARGV_CAPTURE_FILE;
+if (captureFile) {
+  writeFileSync(captureFile, JSON.stringify(args));
+}
+
+process.stdout.write(JSON.stringify({ type: 'result', result: 'ok' }) + '\n');
+process.exit(0);
