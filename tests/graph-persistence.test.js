@@ -602,4 +602,20 @@ describe('persistGraphArtifacts', () => {
     expect(existsSync(join(dir, '.claude', 'graph-index.json'))).toBe(true);
     expect(existsSync(join(dir, '.claude', 'code-map.md'))).toBe(true);
   });
+
+  // Regression: `doc init --dry-run` printed "no files written" while
+  // persistGraphArtifacts wrote .claude/graph.json, code-map.md,
+  // graph-index.json, and appended to .gitignore unconditionally — dry-run
+  // never gated this call at all.
+  it('writes nothing when dryRun is set, still returning serialized data', () => {
+    const dir = join(FIXTURES_DIR, 'persist-dry-run');
+    mkdirSync(dir, { recursive: true });
+
+    const raw = makeRawGraph();
+    const serialized = persistGraphArtifacts(dir, raw, { dryRun: true });
+
+    expect(serialized).toBeTruthy();
+    expect(existsSync(join(dir, '.claude'))).toBe(false);
+    expect(existsSync(join(dir, '.gitignore'))).toBe(false);
+  });
 });
