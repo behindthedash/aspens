@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdirSync, writeFileSync, rmSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { transformForTarget, validateTransformedFiles, projectCodexDomainDocs, ensureRootKeyFilesSection, syncSkillsSection, syncBehaviorSection, assertTargetParity, sanitizePublishedContent } from '../src/lib/target-transform.js';
+import { transformForTarget, validateTransformedFiles, projectCodexDomainDocs, ensureRootKeyFilesSection, syncSkillsSection, syncBehaviorSection, assertTargetParity, sanitizePublishedContent, collectSkillsForList, ensureAspensImportBlock, buildAspensIndexContent, ASPENS_INDEX_PATH } from '../src/lib/target-transform.js';
 import { TARGETS } from '../src/lib/target.js';
 
 const mockScanResult = {
@@ -192,7 +192,53 @@ describe('transformForTarget — Skills section completeness (regression)', () =
     expect(rootAgents.content).toContain('Stripe billing flows (updated)');
   });
 
-  it('falls back to pending-only Skills list when repoPath is unavailable', () => {
+  // Regression: doc-init's chunked mode writes files incrementally as each
+  // domain finishes, calling transformForTarget with only the base skill
+  // (no CLAUDE.md — it's generated last). With repoPath pointing at a repo
+  // that has no CLAUDE.md on disk yet either, buildRootInstructions used to
+  // fall back to the base skill's own raw content as the root AGENTS.md —
+  // reproduced live against a real fixture repo (base skill's YAML
+  // frontmatter and all landed in AGENTS.md).
+  it('emits no root AGENTS.md yet when only the base skill exists and repoPath has no CLAUDE.md (mid doc-init generation)', () => {
+    const midGenRoot = join(__dirname, 'fixtures', 'mid-gen-no-instructions-file');
+    rmSync(midGenRoot, { recursive: true, force: true });
+    mkdirSync(join(midGenRoot, '.claude', 'skills', 'base'), { recursive: true });
+    writeFileSync(
+      join(midGenRoot, '.claude', 'skills', 'base', 'skill.md'),
+      '---\nname: base\ndescription: Core conventions\n---\n\nBase content.\n',
+      'utf8',
+    );
+
+    try {
+      const files = [
+        { path: '.claude/skills/base/skill.md', content: '---\nname: base\ndescription: Core conventions\n---\n\nBase content.\n' },
+      ];
+
+      const result = transformForTarget(
+        files,
+        TARGETS.claude,
+        TARGETS.codex,
+        { scanResult: { domains: [] }, repoPath: midGenRoot }
+      );
+
+      const rootAgents = result.find(f => f.path === 'AGENTS.md');
+      expect(rootAgents).toBeUndefined();
+      // The base skill mirror should still be produced.
+      expect(result.find(f => f.path === '.agents/skills/base/SKILL.md')).toBeDefined();
+    } finally {
+      rmSync(midGenRoot, { recursive: true, force: true });
+    }
+  });
+
+  // Regression: buildRootInstructions used to fall back to the base skill's
+  // own raw content (frontmatter and all) as a stand-in for root instructions
+  // prose whenever no instructionsFile was available. During doc-init's
+  // chunked incremental writes, the root instructions file doesn't exist yet
+  // while base/domain skills are still generating, so this fallback wrote
+  // the base skill's content as AGENTS.md/CLAUDE.md itself — and because
+  // that write wasn't forced, a later correct write (once the real
+  // instructions file existed) got silently skipped as "already exists".
+  it('emits no root instructions file when neither instructionsFile nor on-disk content is available (no baseSkill-content fallback)', () => {
     const files = [
       { path: '.claude/skills/billing/skill.md', content: '---\nname: billing\ndescription: Billing\n---\n\nBilling.\n' },
       { path: '.claude/skills/base/skill.md',    content: '---\nname: base\ndescription: Base\n---\n\nBase.\n' },
@@ -206,8 +252,38 @@ describe('transformForTarget — Skills section completeness (regression)', () =
     );
 
     const rootAgents = result.find(f => f.path === 'AGENTS.md');
-    expect(rootAgents.content).toContain('.agents/skills/base/SKILL.md');
-    expect(rootAgents.content).toContain('.agents/skills/billing/SKILL.md');
+    expect(rootAgents).toBeUndefined();
+    // The skill mirrors themselves should still be produced.
+    expect(result.find(f => f.path === '.agents/skills/base/SKILL.md')).toBeDefined();
+    expect(result.find(f => f.path === '.agents/skills/billing/SKILL.md')).toBeDefined();
+  });
+
+  // Regression: doc-init's canonical CLAUDE.md `## Skills` section (the
+  // claude-target path in generateChunked, distinct from the
+  // directory-scoped codex/opencode transform above) used to compute its
+  // skill list from only the in-memory `allFiles` generated in the CURRENT
+  // invocation, not on-disk state. A partial-retry run (e.g. `--mode
+  // base-only` recovering a failed root-instructions generation) only
+  // regenerates the base skill, so CLAUDE.md's Skills section undercounted
+  // every domain skill that already existed on disk from an earlier
+  // successful pass. doc-init.js now calls collectSkillsForList (the same
+  // on-disk-merge helper the codex/opencode path already relied on) with
+  // the same argument shape used here: files=allFiles (base skill only, as
+  // in a base-only recovery run), instructionsFile=null (not generated yet).
+  it('collectSkillsForList includes on-disk domain skills even when the pending in-memory set only has the base skill', () => {
+    const pendingBaseSkill = { path: '.claude/skills/base/skill.md', content: '---\nname: base\ndescription: Core conventions (regenerated)\n---\n\nBase content.\n' };
+
+    const { baseSkillForList, domainSkillsForList } = collectSkillsForList(
+      [pendingBaseSkill], pendingBaseSkill, null, TARGETS.claude, fixtureRoot,
+    );
+
+    expect(baseSkillForList.content).toContain('regenerated');
+    const domainNames = domainSkillsForList.map(s => s.path);
+    expect(domainNames).toContain('.claude/skills/billing/skill.md');
+    expect(domainNames).toContain('.claude/skills/auth/skill.md');
+    expect(domainNames).toContain('.claude/skills/payments/skill.md');
+    expect(domainNames).toContain('.claude/skills/profile/skill.md');
+    expect(domainNames).toContain('.claude/skills/platform/skill.md');
   });
 });
 
@@ -657,5 +733,83 @@ describe('centralized transform (opencode) strips Claude-Code-only content', () 
     ];
     const result = transformForTarget(files, TARGETS.claude, TARGETS.claude, {});
     expect(result[0].content).toContain('Claude Code hooks and skill-rules.json');
+  });
+});
+
+// Companion brief 20260816-171547: never destructively rewrite CLAUDE.md/
+// AGENTS.md — write the Skills/Behavior index to an aspens-owned file
+// instead, and only ever touch a delimited, tool-owned block in the target
+// doc (never regenerate its whole content). Mirrors the pattern this
+// workspace's own gitnexus tooling already uses safely (see
+// ~/rules/CLAUDE.repo.md §1, the `@AGENTS.md`-import convention).
+describe('ensureAspensImportBlock / buildAspensIndexContent (companion brief 20260816-171547)', () => {
+  const baseSkill = { path: '.claude/skills/base/skill.md', content: '---\nname: base\ndescription: Base repo skill\n---\n\nBase.\n' };
+  const domainSkills = [
+    { path: '.claude/skills/billing/skill.md', content: '---\nname: billing\ndescription: Billing flows\n---\n\nBilling.\n' },
+  ];
+
+  it('appends a delimited block at the end rather than mutating the rest of the document', () => {
+    const original = '# My Project\n\nSubstantial hand-authored content.\n\n## Architecture\n\nDetails here.\n';
+    const result = ensureAspensImportBlock(original, ASPENS_INDEX_PATH);
+
+    expect(result).toContain(original.trim());
+    expect(result).toContain('<!-- aspens:start -->');
+    expect(result).toContain(`@${ASPENS_INDEX_PATH}`);
+    expect(result).toContain('<!-- aspens:end -->');
+    // The block comes after the hand-authored content, not inserted mid-document.
+    expect(result.indexOf('Architecture')).toBeLessThan(result.indexOf('<!-- aspens:start -->'));
+  });
+
+  it('is idempotent: running it twice leaves content outside the block byte-for-byte unchanged', () => {
+    const original = '# My Project\n\n' + 'Real hand-authored content.\n\n'.repeat(20);
+    const once = ensureAspensImportBlock(original, ASPENS_INDEX_PATH);
+    const twice = ensureAspensImportBlock(once, ASPENS_INDEX_PATH);
+
+    expect(twice).toBe(once);
+    const outsideBlock = twice.split('<!-- aspens:start -->')[0];
+    expect(outsideBlock.trim()).toBe(original.trim());
+  });
+
+  it('only replaces content between the markers on a second call, never content outside them', () => {
+    const original = '# My Project\n\nHand-authored intro.\n\n## Notes\n\nMore hand-authored prose.\n';
+    const first = ensureAspensImportBlock(original, ASPENS_INDEX_PATH);
+    // Simulate a stale/corrupted block body — only the region between the
+    // markers should ever be touched on repair.
+    const tampered = first.replace(`@${ASPENS_INDEX_PATH}`, '@stale/path.md');
+    const repaired = ensureAspensImportBlock(tampered, ASPENS_INDEX_PATH);
+
+    expect(repaired).toContain(`@${ASPENS_INDEX_PATH}`);
+    expect(repaired).not.toContain('@stale/path.md');
+    expect(repaired.split('<!-- aspens:start -->')[0].trim()).toBe('# My Project\n\nHand-authored intro.\n\n## Notes\n\nMore hand-authored prose.'.trim());
+  });
+
+  it('migrates a pre-existing inline ## Skills / ## Behavior section instead of leaving it as stale duplicate content', () => {
+    const legacy = [
+      '# My Project',
+      '',
+      '## Skills',
+      '',
+      '- `.claude/skills/base/skill.md` — old listing',
+      '',
+      '## Behavior',
+      '',
+      '- old rule',
+    ].join('\n');
+
+    const result = ensureAspensImportBlock(legacy, ASPENS_INDEX_PATH);
+    expect(result).not.toContain('## Skills');
+    expect(result).not.toContain('## Behavior');
+    expect(result).not.toContain('old listing');
+    expect(result).not.toContain('old rule');
+    expect(result).toContain('# My Project');
+    expect(result).toContain(`@${ASPENS_INDEX_PATH}`);
+  });
+
+  it('buildAspensIndexContent produces a self-contained, regeneratable Skills + Behavior index', () => {
+    const content = buildAspensIndexContent(baseSkill, domainSkills, TARGETS.claude, false);
+    expect(content).toContain('.claude/skills/base/skill.md');
+    expect(content).toContain('.claude/skills/billing/skill.md');
+    expect(content).toContain('## Behavior');
+    expect(content).toContain('Do not hand-edit');
   });
 });

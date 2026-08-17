@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync, existsSync } from 'fs';
 import { join, dirname, basename } from 'path';
 import { findSkillFiles, parseKeywords } from './skill-reader.js';
-import { sanitizePublishedContent } from './target-transform.js';
+import { sanitizePublishedContent, ASPENS_INDEX_PATH } from './target-transform.js';
 
 /**
  * Write parsed skill files to the target repo.
@@ -14,14 +14,17 @@ export function writeSkillFiles(repoPath, files, options = {}) {
   for (const file of files) {
     const fullPath = join(repoPath, file.path);
     const exists = existsSync(fullPath);
+    // The aspens-owned index file is safe to regenerate wholesale on every
+    // run regardless of --force — nothing else should ever hand-edit it.
+    const effectiveForce = force || file.path === ASPENS_INDEX_PATH;
 
     if (dryRun) {
-      const action = exists && !force ? 'would-skip' : exists ? 'would-overwrite' : 'would-create';
+      const action = exists && !effectiveForce ? 'would-skip' : exists ? 'would-overwrite' : 'would-create';
       results.push({ path: file.path, status: action, content: file.content });
       continue;
     }
 
-    if (exists && !force) {
+    if (exists && !effectiveForce) {
       results.push({ path: file.path, status: 'skipped', reason: 'already exists (use --force to overwrite)' });
       continue;
     }

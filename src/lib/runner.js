@@ -64,7 +64,18 @@ export function runClaude(prompt, options = {}) {
   if (disableTools) {
     toolFlags = ['--disallowedTools', 'Bash,Read,Write,Edit,Glob,Grep,Agent,WebSearch,WebFetch,NotebookEdit'];
   } else if (allowedTools && allowedTools.length > 0) {
-    toolFlags = ['--allowedTools', allowedTools.join(',')];
+    // `--allowedTools` only pre-approves tools for the interactive permission
+    // prompt — in non-interactive `-p` mode there's no prompt to skip, so it
+    // has no restrictive effect and the CLI's full default tool set (Write,
+    // Edit, Bash, MCP servers, ...) stays available regardless. `--tools`
+    // is the flag that actually defines the available tool set; confirmed via
+    // a live probe (`claude -p --allowedTools Read,Glob,Grep` still wrote a
+    // file; `claude -p --tools Read,Glob,Grep` correctly refused). Using
+    // `--allowedTools` here let the read-only-restricted generation calls
+    // write files directly via their own Write tool, bypassing aspens' own
+    // target-filtering entirely (e.g. a canonical CLAUDE.md/.claude/skills/*
+    // file landing on disk even on a --target codex run).
+    toolFlags = ['--tools', allowedTools.join(',')];
   }
 
   const modelFlags = model ? ['--model', model] : [];

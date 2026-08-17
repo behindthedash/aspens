@@ -15,7 +15,7 @@ import { installGitHook, removeGitHook } from '../lib/git-hook.js';
 import { isGitRepo, getGitRoot, getGitDiff, getGitLog, getChangedFiles } from '../lib/git-helpers.js';
 import { TARGETS, getAllowedPaths, loadConfig } from '../lib/target.js';
 import { getSelectedFilesDiff, buildPrioritizedDiff, truncate } from '../lib/diff-helpers.js';
-import { projectCodexDomainDocs, transformForTarget, assertTargetParity, syncSkillsSection, syncBehaviorSection, ensureRootKeyFilesSection } from '../lib/target-transform.js';
+import { projectCodexDomainDocs, transformForTarget, assertTargetParity, syncSkillsSection, syncBehaviorSection, ensureRootKeyFilesSection, ensureAspensImportBlock, buildAspensIndexContent, ASPENS_INDEX_PATH } from '../lib/target-transform.js';
 import { isNoOpDiff } from '../lib/diff-classifier.js';
 
 const READ_ONLY_TOOLS = ['Read', 'Glob', 'Grep'];
@@ -134,11 +134,26 @@ export function repairDeterministicSections(repoPath, sourceTarget, publishTarge
   const startContent = readFileSync(instrPath, 'utf8');
 
   let updated = ensureRootKeyFilesSection(startContent);
-  updated = syncSkillsSection(updated, baseSkillForList, domainSkillsForList, sourceTarget, false);
-  updated = syncBehaviorSection(updated);
-  if (updated === startContent) return [];
+  // Claude target: maintain the delimited aspens:start/aspens:end import
+  // block instead of injecting ## Skills/## Behavior content directly — see
+  // ensureAspensImportBlock. Codex/opencode have no working `@path` import
+  // mechanism, so they keep the existing inline-injection behavior.
+  let indexFiles = [];
+  if (sourceTarget.id === 'claude') {
+    updated = ensureAspensImportBlock(updated, ASPENS_INDEX_PATH);
+    const newIndexContent = buildAspensIndexContent(baseSkillForList, domainSkillsForList, sourceTarget, false);
+    const indexPath = join(repoPath, ASPENS_INDEX_PATH);
+    const currentIndexContent = existsSync(indexPath) ? readFileSync(indexPath, 'utf8') : null;
+    if (newIndexContent !== currentIndexContent) {
+      indexFiles = [{ path: ASPENS_INDEX_PATH, content: newIndexContent }];
+    }
+  } else {
+    updated = syncSkillsSection(updated, baseSkillForList, domainSkillsForList, sourceTarget, false);
+    updated = syncBehaviorSection(updated);
+  }
+  if (updated === startContent && indexFiles.length === 0) return [];
 
-  const baseFiles = [{ path: instructionsFile, content: updated }];
+  const baseFiles = [{ path: instructionsFile, content: updated }, ...indexFiles];
   const perTarget = publishFilesForTargets(baseFiles, sourceTarget, publishTargets, scan, graphSerialized, repoPath);
   const files = flattenPublishedMap(perTarget);
   const directWriteFiles = files.filter(f => !(f.path.endsWith('/AGENTS.md') && f.path !== 'AGENTS.md'));
