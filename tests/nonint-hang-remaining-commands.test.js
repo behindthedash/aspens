@@ -5,7 +5,12 @@ import { join } from 'path';
 
 const CLI = join(import.meta.dirname, '..', 'bin', 'cli.js');
 const FIXTURE_DIR = join(import.meta.dirname, 'tmp-nonint-hang-remaining-fixture');
-const BOUND_MS = 15000; // generous ceiling; a fixed run must finish well under it
+// Generous ceiling; a fixed run finishes in ~2s idle, but each test here
+// spawns a full CLI process and the file runs alongside every other vitest
+// worker — under host load (load avg ~20) a correct run has been observed
+// taking ~11s, so 15s flaked. A hang is unbounded anyway, so a wider bound
+// costs nothing on a pass.
+const BOUND_MS = 45000;
 
 beforeEach(() => {
   if (existsSync(FIXTURE_DIR)) rmSync(FIXTURE_DIR, { recursive: true, force: true });

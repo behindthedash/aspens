@@ -178,6 +178,7 @@ doc
   .option('--install-hook', 'Install Claude git post-commit hook')
   .option('--remove-hook', 'Remove Claude git post-commit hook')
   .option('--dry-run', 'Preview without writing files')
+  .option('--commit', 'Commit the regenerated docs as their own commit')
   .option('--timeout <seconds>', 'Backend timeout in seconds', parseTimeout, 300)
   .option('--model <model>', 'Model to use for the selected backend')
   .option('--verbose', 'Show backend reads/activity in real time')

@@ -68,6 +68,17 @@ describe.sequential('installGitHook', () => {
     expect(content.match(/^#!\/bin\/sh/gm)).toHaveLength(1);
   });
 
+  it('upgrades a labeled block that predates --commit instead of leaving it non-self-landing', () => {
+    installGitHook(TEST_DIR);
+    const hookPath = join(HOOKS_DIR, 'post-commit');
+    const legacy = readFileSync(hookPath, 'utf8').replace('--commits 1 --commit "$PROJECT_PATH"', '--commits 1 "$PROJECT_PATH"');
+    writeFileSync(hookPath, legacy);
+    installGitHook(TEST_DIR);
+    const content = readFileSync(hookPath, 'utf8');
+    expect(content).toContain('doc sync --commits 1 --commit "$PROJECT_PATH"');
+    expect(content.match(/# >>> aspens doc-sync hook \(\.\)/g)).toHaveLength(1);
+  });
+
   it('upgrades old unlabeled aspens hook block instead of appending a duplicate', () => {
     writeFileSync(HOOK_PATH, [
       '#!/bin/sh',
@@ -97,7 +108,7 @@ describe.sequential('installGitHook', () => {
     const content = readFileSync(HOOK_PATH, 'utf8');
     expect(content).toContain('# >>> aspens doc-sync hook (backend) (do not edit) >>>');
     expect(content).toContain('PROJECT_PATH="${REPO_ROOT}/backend"');
-    expect(content).toContain('doc sync --commits 1 "$PROJECT_PATH"');
+    expect(content).toContain('doc sync --commits 1 --commit "$PROJECT_PATH"');
   });
 
   it('supports installing hooks for multiple subprojects', () => {
