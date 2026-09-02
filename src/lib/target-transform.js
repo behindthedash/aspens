@@ -9,7 +9,7 @@ import { join, relative } from 'path';
 import { readFileSync } from 'fs';
 import { TARGETS } from './target.js';
 import { CliError } from './errors.js';
-import { findSkillFiles } from './skill-reader.js';
+import { findSkillFiles, readFrontmatterScalar } from './skill-reader.js';
 
 export function transformForTarget(files, sourceTarget, destTarget, context) {
   if (sourceTarget.id === destTarget.id) return files;
@@ -428,8 +428,8 @@ function buildSkillRefs(baseSkill, domainSkills, destTarget, hasArchitectureSkil
 }
 
 function extractFrontmatterField(content, field) {
-  const match = content.match(new RegExp('^' + escapeRegex(field) + ':\\s*(.+)$', 'm'));
-  return match ? match[1].trim() : '';
+  const match = content.match(/^---\s*\r?\n([\s\S]*?)\r?\n---/);
+  return (match && readFrontmatterScalar(match[1], field)) || '';
 }
 
 function generateCondensedCodeMap(serializedGraph) {

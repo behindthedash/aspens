@@ -55,15 +55,44 @@ export function parseFrontmatter(content) {
   if (!match) return null;
 
   const block = match[1];
-  const nameMatch = block.match(/name:\s*(.+)/);
-  const descMatch = block.match(/description:\s*(.+)/);
+  const name = readFrontmatterScalar(block, 'name');
+  const description = readFrontmatterScalar(block, 'description');
 
-  if (!nameMatch && !descMatch) return null;
+  if (name === null && description === null) return null;
 
-  return {
-    name: nameMatch ? nameMatch[1].trim() : null,
-    description: descMatch ? descMatch[1].trim() : null,
-  };
+  return { name, description };
+}
+
+/**
+ * Read a top-level scalar field from a YAML frontmatter block (the text between
+ * the `---` fences). Returns the field's value as a single line, or null when the
+ * field is absent. Handles plain scalars, single/double-quoted scalars, and the
+ * `>` / `|` block scalars (with optional chomping indicators) that SKILL.md
+ * authors use for multi-line descriptions -- a block scalar's indented
+ * continuation lines are folded into one space-separated line. Regex only, no
+ * YAML library (matching the existing codebase pattern).
+ */
+export function readFrontmatterScalar(block, field) {
+  if (!block || typeof block !== 'string') return null;
+  const lines = block.split(/\r?\n/);
+  const header = new RegExp('^' + field.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ':[ \\t]*(.*)$');
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(header);
+    if (!m) continue;
+    const inline = m[1].trim();
+    if (!/^[>|][+-]?$/.test(inline)) {
+      return inline.replace(/^(['"])(.*)\1$/, '$2');
+    }
+    const parts = [];
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = lines[j];
+      if (line.trim() === '') continue;
+      if (!/^\s/.test(line)) break;
+      parts.push(line.trim());
+    }
+    return parts.join(' ');
+  }
+  return null;
 }
 
 /**
