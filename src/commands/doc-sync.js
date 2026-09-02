@@ -16,7 +16,7 @@ import { commitSyncOutput } from '../lib/sync-commit.js';
 import { isGitRepo, getGitRoot, getGitDiff, getGitLog, getChangedFiles } from '../lib/git-helpers.js';
 import { TARGETS, getAllowedPaths, loadConfig } from '../lib/target.js';
 import { getSelectedFilesDiff, buildPrioritizedDiff, truncate } from '../lib/diff-helpers.js';
-import { projectCodexDomainDocs, transformForTarget, assertTargetParity, syncSkillsSection, syncBehaviorSection, ensureRootKeyFilesSection, ensureAspensImportBlock, buildAspensIndexContent, ASPENS_INDEX_PATH } from '../lib/target-transform.js';
+import { projectCodexDomainDocs, transformForTarget, assertTargetParity, syncSkillsSection, syncBehaviorSection, ensureRootKeyFilesSection, ensureAspensImportBlock, ensureAspensManagedBlock, buildAspensIndexContent, collectSkillsForList, ASPENS_INDEX_PATH } from '../lib/target-transform.js';
 import { isNoOpDiff } from '../lib/diff-classifier.js';
 
 const READ_ONLY_TOOLS = ['Read', 'Glob', 'Grep'];
@@ -130,28 +130,9 @@ export function repairDeterministicSections(repoPath, sourceTarget, publishTarge
   if (!existsSync(instrPath)) return [];
 
   const existingSkills = findExistingSkills(repoPath, sourceTarget);
-  const baseSkillForList = existingSkills.find(s => s.name === 'base') || null;
-  const domainSkillsForList = existingSkills.filter(s => s.name !== 'base');
   const startContent = readFileSync(instrPath, 'utf8');
 
-  let updated = ensureRootKeyFilesSection(startContent);
-  // Claude target: maintain the delimited aspens:start/aspens:end import
-  // block instead of injecting ## Skills/## Behavior content directly — see
-  // ensureAspensImportBlock. Codex/opencode have no working `@path` import
-  // mechanism, so they keep the existing inline-injection behavior.
-  let indexFiles = [];
-  if (sourceTarget.id === 'claude') {
-    updated = ensureAspensImportBlock(updated, ASPENS_INDEX_PATH);
-    const newIndexContent = buildAspensIndexContent(baseSkillForList, domainSkillsForList, sourceTarget, false);
-    const indexPath = join(repoPath, ASPENS_INDEX_PATH);
-    const currentIndexContent = existsSync(indexPath) ? readFileSync(indexPath, 'utf8') : null;
-    if (newIndexContent !== currentIndexContent) {
-      indexFiles = [{ path: ASPENS_INDEX_PATH, content: newIndexContent }];
-    }
-  } else {
-    updated = syncSkillsSection(updated, baseSkillForList, domainSkillsForList, sourceTarget, false);
-    updated = syncBehaviorSection(updated);
-  }
+  const { updated, indexFiles } = applyDeterministicInstructionSections(startContent, sourceTarget, existingSkills, repoPath);
   if (updated === startContent && indexFiles.length === 0) return [];
 
   const baseFiles = [{ path: instructionsFile, content: updated }, ...indexFiles];
@@ -165,6 +146,65 @@ export function repairDeterministicSections(repoPath, sourceTarget, publishTarge
   ];
 }
 
+/**
+ * Deterministic `## Skills` + `## Behavior` maintenance on the source
+ * target's root instructions file. Every sync path (no-diff repair,
+ * --refresh, and the LLM commit sync) must go through here so they agree on
+ * the mechanism: the Claude source keeps a delimited aspens:start/aspens:end
+ * import block pointing at the aspens-owned index file (see
+ * ensureAspensImportBlock), which is what keeps hand-authored CLAUDE.md
+ * content untouched; a codex/opencode source has no `@path` import, so it
+ * keeps the inline injection.
+ *
+ * Returns `{ updated, indexFiles }` — the new instructions content and the
+ * index file to publish alongside it (empty when the index is already current).
+ */
+function applyDeterministicInstructionSections(startContent, sourceTarget, existingSkills, repoPath) {
+  const baseSkillForList = existingSkills.find(s => s.name === 'base') || null;
+  const domainSkillsForList = existingSkills.filter(s => s.name !== 'base');
+
+  let updated = ensureRootKeyFilesSection(startContent);
+  const indexFiles = [];
+  if (sourceTarget.id === 'claude') {
+    updated = ensureAspensImportBlock(updated, ASPENS_INDEX_PATH);
+    const newIndexContent = buildAspensIndexContent(baseSkillForList, domainSkillsForList, sourceTarget, false);
+    const indexPath = join(repoPath, ASPENS_INDEX_PATH);
+    const currentIndexContent = existsSync(indexPath) ? readFileSync(indexPath, 'utf8') : null;
+    if (newIndexContent !== currentIndexContent) {
+      indexFiles.push({ path: ASPENS_INDEX_PATH, content: newIndexContent });
+    }
+  } else {
+    updated = syncSkillsSection(updated, baseSkillForList, domainSkillsForList, sourceTarget, false);
+    updated = syncBehaviorSection(updated);
+  }
+  return { updated, indexFiles };
+}
+
+/**
+ * A non-source target's root instructions file (e.g. opencode's AGENTS.md
+ * next to a Claude-source CLAUDE.md) may be hand-authored and owned by the
+ * user. Never overwrite it wholesale with the transformed source file —
+ * maintain a delimited aspens block inside it instead, leaving everything
+ * outside the markers untouched. A dest file that doesn't exist yet keeps
+ * the transformed content (fresh publish).
+ */
+function preserveExistingDestInstructions(files, baseFiles, sourceTarget, destTarget, repoPath) {
+  const idx = files.findIndex(f => f.path === destTarget.instructionsFile);
+  if (idx === -1 || !repoPath) return files;
+  const destPath = join(repoPath, destTarget.instructionsFile);
+  if (!existsSync(destPath)) return files;
+
+  const sourceInstructions = baseFiles.find(f => f.path === sourceTarget.instructionsFile) || null;
+  const pendingBaseSkill = baseFiles.find(f => f.path.startsWith(sourceTarget.skillsDir + '/base/')) || null;
+  const { baseSkillForList, domainSkillsForList } = collectSkillsForList(
+    baseFiles, pendingBaseSkill, sourceInstructions, sourceTarget, repoPath,
+  );
+  const content = ensureAspensManagedBlock(readFileSync(destPath, 'utf8'), baseSkillForList, domainSkillsForList, destTarget);
+  const next = [...files];
+  next[idx] = { path: destTarget.instructionsFile, content };
+  return next;
+}
+
 function publishFilesForTargets(baseFiles, sourceTarget, publishTargets, scan, graphSerialized = null, repoPath = null) {
   const perTarget = new Map();
 
@@ -173,11 +213,15 @@ function publishFilesForTargets(baseFiles, sourceTarget, publishTargets, scan, g
     if (target.id === sourceTarget.id) {
       files = [...baseFiles, ...buildDerivedCodexFiles(baseFiles, target, scan)];
     } else {
-      files = transformForTarget(baseFiles, sourceTarget, target, {
+      // The aspens index is a Claude-only auxiliary imported via `@path`;
+      // other targets get its content inlined in their managed block instead.
+      const transformable = baseFiles.filter(f => f.path !== ASPENS_INDEX_PATH);
+      files = transformForTarget(transformable, sourceTarget, target, {
         scanResult: scan,
         graphSerialized,
         repoPath,
       });
+      files = preserveExistingDestInstructions(files, transformable, sourceTarget, target, repoPath);
     }
     perTarget.set(target.id, dedupeFiles(files));
   }
@@ -460,10 +504,9 @@ ${truncate(instructionsContent, 5000)}
     }
   }
 
-  // Deterministic `## Skills` + `## Behavior` injection on the canonical
-  // instructions file. Runs whether or not the LLM updated it, so drift
-  // gets repaired every sync. Source target paths flow through unchanged;
-  // transformForTarget handles the codex/claude projection downstream.
+  // Deterministic `## Skills` + `## Behavior` maintenance on the canonical
+  // instructions file (see applyDeterministicInstructionSections). Runs
+  // whether or not the LLM updated it, so drift gets repaired every sync.
   {
     const instrPath = join(repoPath, instructionsFile);
     const pending = baseFiles.find(f => f.path === instructionsFile);
@@ -472,23 +515,13 @@ ${truncate(instructionsContent, 5000)}
       : (existsSync(instrPath) ? readFileSync(instrPath, 'utf8') : null);
 
     if (startContent != null) {
-      const baseSkillForList = existingSkills.find(s => s.name === 'base') || null;
-      const domainSkillsForList = existingSkills.filter(s => s.name !== 'base');
-
-      let updated = ensureRootKeyFilesSection(startContent);
-      updated = syncSkillsSection(
-        updated,
-        baseSkillForList,
-        domainSkillsForList,
-        sourceTarget,
-        false
-      );
-      updated = syncBehaviorSection(updated);
+      const { updated, indexFiles } = applyDeterministicInstructionSections(startContent, sourceTarget, existingSkills, repoPath);
 
       if (updated !== startContent) {
         if (pending) pending.content = updated;
         else baseFiles.push({ path: instructionsFile, content: updated });
       }
+      baseFiles.push(...indexFiles);
     }
   }
 
@@ -827,23 +860,13 @@ async function refreshAllSkills(repoPath, options, sourceTarget, publishTargets 
   if (existsSync(instrPath)) {
     const pending = allUpdatedFiles.find(f => f.path === instrFile);
     const startContent = pending ? pending.content : readFileSync(instrPath, 'utf8');
-    const baseSkillForList = existingSkills.find(s => s.name === 'base') || null;
-    const domainSkillsForList = existingSkills.filter(s => s.name !== 'base');
-
-    let updated = ensureRootKeyFilesSection(startContent);
-    updated = syncSkillsSection(
-      updated,
-      baseSkillForList,
-      domainSkillsForList,
-      sourceTarget,
-      false
-    );
-    updated = syncBehaviorSection(updated);
+    const { updated, indexFiles } = applyDeterministicInstructionSections(startContent, sourceTarget, existingSkills, repoPath);
 
     if (updated !== startContent) {
       if (pending) pending.content = updated;
       else allUpdatedFiles.push({ path: instrFile, content: updated });
     }
+    allUpdatedFiles.push(...indexFiles);
   }
 
   // Step 6: Check for uncovered domains

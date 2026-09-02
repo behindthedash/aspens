@@ -345,10 +345,10 @@ export function buildAspensIndexContent(baseSkill, domainSkills, destTarget, has
  * approach is stripped here as a one-time migration so it doesn't linger as
  * stale duplicate content alongside the new index-file reference.
  *
- * Codex/opencode targets are intentionally out of scope: AGENTS.md has no
- * working `@path` import mechanism, so the delimited block would just be
- * inert text there. Their root instructions still use the existing inline
- * syncSkillsSection/syncBehaviorSection injection (see buildRootInstructions).
+ * Codex/opencode targets have no working `@path` import mechanism, so an
+ * import block would just be inert text there — an existing AGENTS.md on
+ * those targets gets the same delimited block with the content inlined
+ * instead (see ensureAspensManagedBlock).
  */
 export function ensureAspensImportBlock(content, indexRelPath = ASPENS_INDEX_PATH) {
   let working = content || '';
@@ -357,12 +357,29 @@ export function ensureAspensImportBlock(content, indexRelPath = ASPENS_INDEX_PAT
     .replace(/\n## Behavior\s*\n[\s\S]*?(?=\n## |\n\*\*Last Updated|$)/i, '\n')
     .replace(/(\n){3,}/g, '\n\n');
 
-  const block = `${ASPENS_BLOCK_START}\n@${indexRelPath}\n${ASPENS_BLOCK_END}`;
+  return replaceOrAppendAspensBlock(working, `@${indexRelPath}`);
+}
+
+/**
+ * Maintain the delimited aspens block in a root instructions file that has
+ * no `@path` import mechanism (codex/opencode AGENTS.md): the Skills list and
+ * Behavior guardrails are inlined *inside* the block. Everything outside the
+ * markers — typically hand-authored AGENTS.md content — is left byte-for-byte
+ * untouched, so publishing to a second target never clobbers the user's file.
+ */
+export function ensureAspensManagedBlock(content, baseSkill, domainSkills, destTarget) {
+  let body = syncSkillsSection('', baseSkill, domainSkills, destTarget, false);
+  body = syncBehaviorSection(body || '## Behavior\n');
+  return replaceOrAppendAspensBlock(content || '', body.trim());
+}
+
+function replaceOrAppendAspensBlock(content, body) {
+  const block = `${ASPENS_BLOCK_START}\n${body}\n${ASPENS_BLOCK_END}`;
   const blockRegex = new RegExp(escapeRegex(ASPENS_BLOCK_START) + '[\\s\\S]*?' + escapeRegex(ASPENS_BLOCK_END));
-  if (blockRegex.test(working)) {
-    return working.replace(blockRegex, block);
+  if (blockRegex.test(content)) {
+    return content.replace(blockRegex, block);
   }
-  return working.replace(/\s+$/, '') + '\n\n' + block + '\n';
+  return content.replace(/\s+$/, '') + '\n\n' + block + '\n';
 }
 
 /**
