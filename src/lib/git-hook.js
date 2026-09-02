@@ -77,8 +77,10 @@ __aspens_doc_sync_${projectSlug}() {
     tail -100 "\$ASPENS_LOG" > "\$ASPENS_LOG.tmp" && mv "\$ASPENS_LOG.tmp" "\$ASPENS_LOG"
   fi
 
-  # Run fully detached so git returns immediately (POSIX-compatible — no disown needed)
-  (echo "[sync] \$(date '+%Y-%m-%d %H:%M:%S') started (${projectLabel})" >> "\$ASPENS_LOG" && ${aspensCmd} doc sync --commits 1 "\$PROJECT_PATH" >> "\$ASPENS_LOG" 2>&1; echo "[sync] \$(date '+%Y-%m-%d %H:%M:%S') finished (exit \$?)" >> "\$ASPENS_LOG") </dev/null >/dev/null 2>&1 &
+  # Run fully detached so git returns immediately (POSIX-compatible — no disown needed).
+  # --commit lands the regenerated docs as their own commit; the aspens-only
+  # skip above keeps that follow-up commit from re-triggering a sync.
+  (echo "[sync] \$(date '+%Y-%m-%d %H:%M:%S') started (${projectLabel})" >> "\$ASPENS_LOG" && ${aspensCmd} doc sync --commits 1 --commit "\$PROJECT_PATH" >> "\$ASPENS_LOG" 2>&1; echo "[sync] \$(date '+%Y-%m-%d %H:%M:%S') finished (exit \$?)" >> "\$ASPENS_LOG") </dev/null >/dev/null 2>&1 &
 }
 __aspens_doc_sync_${projectSlug}
 # <<< aspens doc-sync hook (${projectLabel}) <<<
@@ -87,6 +89,13 @@ __aspens_doc_sync_${projectSlug}
   if (existsSync(hookPath)) {
     const existing = readFileSync(hookPath, 'utf8');
     if (existing.includes(`# >>> aspens doc-sync hook (${projectLabel})`)) {
+      if (!existing.includes(`doc sync --commits 1 --commit "\$PROJECT_PATH"`)) {
+        // Pre-self-landing block: it wrote the regenerated docs but never
+        // committed them. Swap it in place so the repo picks up --commit.
+        writeFileSync(hookPath, existing.replace(buildMarkerRegex(projectLabel), '\n' + hookBlock).trim() + '\n', 'utf8');
+        console.log(pc.green(`\n  Upgraded aspens doc-sync hook for ${projectLabel} (now commits its output).\n`));
+        return;
+      }
       console.log(pc.yellow(`\n  Hook already installed for ${projectLabel}.\n`));
       return;
     }

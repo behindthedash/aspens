@@ -12,6 +12,7 @@ import { buildDomainContext, buildBaseContext } from '../lib/context-builder.js'
 import { CliError } from '../lib/errors.js';
 import { resolveTimeout } from '../lib/timeout.js';
 import { installGitHook, removeGitHook } from '../lib/git-hook.js';
+import { commitSyncOutput } from '../lib/sync-commit.js';
 import { isGitRepo, getGitRoot, getGitDiff, getGitLog, getChangedFiles } from '../lib/git-helpers.js';
 import { TARGETS, getAllowedPaths, loadConfig } from '../lib/target.js';
 import { getSelectedFilesDiff, buildPrioritizedDiff, truncate } from '../lib/diff-helpers.js';
@@ -254,6 +255,7 @@ export async function docSyncCommand(path, options) {
       console.log();
       for (const wr of repairs) console.log(`  ${pc.yellow('~')} ${wr.path} ${pc.dim('(deterministic section repair)')}`);
     }
+    landSyncOutput(gitRoot, repoPath, options, repairs.map(wr => wr.path));
     p.outro(repairs.length > 0 ? 'No diffs — repaired deterministic sections' : 'Nothing to sync');
     return;
   }
@@ -275,6 +277,7 @@ export async function docSyncCommand(path, options) {
       console.log();
       for (const wr of repairs) console.log(`  ${pc.yellow('~')} ${wr.path} ${pc.dim('(deterministic section repair)')}`);
     }
+    landSyncOutput(gitRoot, repoPath, options, repairs.map(wr => wr.path));
     p.outro(repairs.length > 0 ? 'No code changes — repaired deterministic sections' : 'No sync needed');
     return;
   }
@@ -542,6 +545,8 @@ ${truncate(instructionsContent, 5000)}
     } catch { /* non-fatal */ }
   }
 
+  landSyncOutput(gitRoot, repoPath, options, writtenPaths(results));
+
   console.log();
   p.outro(`${results.length} file(s) updated`);
 }
@@ -551,6 +556,30 @@ function toGitRelative(gitRoot, repoPath) {
   const rel = relative(gitRoot, repoPath);
   if (!rel || rel === '.') return '';
   return rel.split('\\').join('/');
+}
+
+/**
+ * Land the files a sync just wrote as their own commit when --commit was
+ * given; otherwise say plainly that the tree is now dirty so nobody is
+ * surprised by an uncommitted AGENTS.md after a hook run.
+ */
+function landSyncOutput(gitRoot, repoPath, options, paths) {
+  if (paths.length === 0) return;
+  if (!options.commit) {
+    p.log.warn(`${paths.length} generated file(s) left uncommitted — run: git add ${paths.join(' ')} && git commit  (or use aspens doc sync --commit)`);
+    return;
+  }
+  const result = commitSyncOutput(gitRoot, repoPath, paths);
+  if (result.committed) {
+    p.log.success(`Committed ${paths.length} generated file(s) as ${result.sha}`);
+  } else {
+    p.log.error(`Generated docs NOT committed (${result.error}) — tree is dirty; commit them by hand: ${paths.join(' ')}`);
+    process.exitCode = 1;
+  }
+}
+
+function writtenPaths(results) {
+  return results.filter(wr => wr.status === 'created' || wr.status === 'overwritten').map(wr => wr.path);
 }
 
 function withProjectPrefix(file, projectPrefix) {
@@ -872,6 +901,8 @@ async function refreshAllSkills(repoPath, options, sourceTarget, publishTargets 
       p.log.info('Updated skill-rules.json');
     } catch { /* non-fatal */ }
   }
+
+  landSyncOutput(getGitRoot(repoPath), repoPath, options, writtenPaths(results));
 
   console.log();
   p.outro(`${results.length} file(s) refreshed`);
