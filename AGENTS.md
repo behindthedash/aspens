@@ -20,7 +20,7 @@
 
 - `npm test` — run Vitest (`vitest run`)
 - `npm start` — run the CLI (`node bin/cli.js`)
-- `npm run lint` — no-op check (`echo 'No linter configured yet' && exit 0`)
+- `npm run lint` — run OXLint (`oxlint .`; `no-undef` is enforced via `.oxlintrc.json`)
 - `aspens scan [path]` — deterministic repo scan
 - `aspens doc init [path]` — generate skills, hooks, and instructions file (`--target claude|codex|all`, `--recommended` for full recommended setup including save-tokens, agents, and doc-sync hook)
 - `aspens doc impact [path]` — show freshness, coverage, drift, and LLM interpretation of generated context (interactive apply for repairs)

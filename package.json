@@ -22,7 +22,7 @@
   "scripts": {
     "test": "vitest run",
     "start": "node bin/cli.js",
-    "lint": "echo 'No linter configured yet' && exit 0",
+    "lint": "oxlint .",
     "postinstall": "echo '\n  📌 aspens v0.8.0: Skill triggers moved from `## Activation` to YAML frontmatter `triggers:` (back-compat preserved). Domain clusters restored to `code-map.md` (language-agnostic). AGENTS.md no longer drops unchanged skills on partial `doc sync`. Code-map.md is now churn-stable across syncs.\n     Re-run `aspens doc sync` to regenerate skills with the new triggers format.\n\n  🌲 aspens is in active development — please keep it up to date.\n     Run into issues? Let us know: https://github.com/aspenkit/aspens/issues\n'"
   },
   "engines": {
@@ -35,6 +35,7 @@
     "picocolors": "^1.1.0"
   },
   "devDependencies": {
+    "oxlint": "1.79.0",
     "vitest": "^4.1.3"
   }
 }
