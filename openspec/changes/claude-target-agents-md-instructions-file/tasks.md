@@ -17,8 +17,8 @@
 - [ ] 3.2 Extend `tests/doc-sync-managed-block.test.js` with cases: recorded `AGENTS.md` + shim `CLAUDE.md` repair leaves `CLAUDE.md` unchanged and fixes `AGENTS.md`; `--refresh` refreshes `AGENTS.md` without creating `CLAUDE.md`; recorded `AGENTS.md` but file deleted makes no root change and no `CLAUDE.md`.
 - [ ] 3.3 Implement the context half of "Context building and impact analysis use the resolved name": edit only `src/lib/context-builder.js` so the `instructionsFile` default comes from `resolveClaudeTarget(repoPath).instructionsFile` instead of the literal `'CLAUDE.md'`, and compute the alternative file as the other member of `CLAUDE_INSTRUCTIONS_FILES` when the primary is a claude name. No caller changes: doc-init and doc-sync already pass `instructionsFile` explicitly.
 - [ ] 3.4 Add `tests/context-builder-instructions-file.test.js` asserting the `## Existing AGENTS.md` primary section followed by `## Existing CLAUDE.md` alternative for a shim repo, and the reverse ordering for a `CLAUDE.md` repo.
-- [ ] 3.5 Implement the impact half of the same requirement: in `src/lib/impact.js` and `src/commands/doc-impact.js`, build the claude target via `resolveClaudeTarget(repoPath)` before `summarizeTarget` so `instructionsFile`, `instructionExists`, and `lastUpdated` reflect the recorded name.
-- [ ] 3.6 Extend `tests/doc-impact.test.js` with a case where `.aspens.json` records `AGENTS.md`, `AGENTS.md` exists, and `CLAUDE.md` does not: the JSON report shows `instructionsFile: "AGENTS.md"` and `instructionExists: true`.
+- [x] 3.5 Implement the impact half of the same requirement: in `src/lib/impact.js` and `src/commands/doc-impact.js`, build the claude target via `resolveClaudeTarget(repoPath)` before `summarizeTarget` so `instructionsFile`, `instructionExists`, and `lastUpdated` reflect the recorded name.
+- [x] 3.6 Extend `tests/doc-impact.test.js` with a case where `.aspens.json` records `AGENTS.md`, `AGENTS.md` exists, and `CLAUDE.md` does not: the JSON report shows `instructionsFile: "AGENTS.md"` and `instructionExists: true`.
 
 ## 4. Guard rails and real-tool verification
 
