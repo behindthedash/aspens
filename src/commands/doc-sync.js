@@ -138,7 +138,7 @@ export function repairDeterministicSections(repoPath, sourceTarget, publishTarge
   const existingSkills = findExistingSkills(repoPath, sourceTarget);
   const startContent = readFileSync(instrPath, 'utf8');
 
-  const { updated, indexFiles } = applyDeterministicInstructionSections(startContent, sourceTarget, existingSkills, repoPath, publishTargets);
+  const { updated, indexFiles } = applyDeterministicInstructionSections(startContent, sourceTarget, existingSkills, repoPath);
   if (updated === startContent && indexFiles.length === 0) return [];
 
   const baseFiles = [{ path: instructionsFile, content: updated }, ...indexFiles];
@@ -162,30 +162,27 @@ export function repairDeterministicSections(repoPath, sourceTarget, publishTarge
  * content untouched; a codex/opencode source has no `@path` import, so it
  * keeps the inline injection.
  *
- * When the Claude target's recorded instructions file is `AGENTS.md` (an
- * `@AGENTS.md` shim CLAUDE.md) and another configured target also publishes
- * to that same root file, the file is shared with a target that cannot follow
- * `@path` imports. The block is then inlined (ensureAspensManagedBlock) and no
- * index file is emitted, so the shared file works for every reader and nothing
- * orphaned is written.
+ * The Claude source's recorded instructions file (`CLAUDE.md`, or `AGENTS.md`
+ * behind an `@AGENTS.md` shim) always keeps the import layout — the root file
+ * imports `.claude/aspens-index.md`, and the shim (when present) imports the
+ * root file — so the two-hop chain Claude Code loads is the same regardless of
+ * which other targets are configured.
  *
  * Returns `{ updated, indexFiles }` — the new instructions content and the
  * index file to publish alongside it (empty when the index is already current).
  */
-function sharesInstructionsFile(sourceTarget, publishTargets) {
-  return (publishTargets || []).some(t => t.id !== sourceTarget.id && t.instructionsFile === sourceTarget.instructionsFile);
-}
-
-function applyDeterministicInstructionSections(startContent, sourceTarget, existingSkills, repoPath, publishTargets = []) {
+function applyDeterministicInstructionSections(startContent, sourceTarget, existingSkills, repoPath) {
   const baseSkillForList = existingSkills.find(s => s.name === 'base') || null;
   const domainSkillsForList = existingSkills.filter(s => s.name !== 'base');
 
   let updated = ensureRootKeyFilesSection(startContent);
   const indexFiles = [];
-  if (sourceTarget.id === 'claude' && sharesInstructionsFile(sourceTarget, publishTargets)) {
-    updated = ensureAspensManagedBlock(updated, baseSkillForList, domainSkillsForList, sourceTarget);
-  } else if (sourceTarget.id === 'claude') {
-    updated = ensureAspensImportBlock(updated, ASPENS_INDEX_PATH);
+  if (sourceTarget.id === 'claude') {
+    // Legacy inline-section migration only targets the default CLAUDE.md;
+    // a recorded AGENTS.md is user-owned outside the delimited block.
+    updated = ensureAspensImportBlock(updated, ASPENS_INDEX_PATH, {
+      migrateLegacySections: sourceTarget.instructionsFile === TARGETS.claude.instructionsFile,
+    });
     const newIndexContent = buildAspensIndexContent(baseSkillForList, domainSkillsForList, sourceTarget, false);
     const indexPath = join(repoPath, ASPENS_INDEX_PATH);
     const currentIndexContent = existsSync(indexPath) ? readFileSync(indexPath, 'utf8') : null;
@@ -231,11 +228,17 @@ function publishFilesForTargets(baseFiles, sourceTarget, publishTargets, scan, g
     let files;
     if (target.id === sourceTarget.id) {
       files = [...baseFiles, ...buildDerivedCodexFiles(baseFiles, target, scan)];
-    } else if (target.instructionsFile === sourceTarget.instructionsFile) {
-      // Both targets publish the same root file (claude recorded as
-      // AGENTS.md next to opencode). The source owns that file — its pending
-      // content already carries the inlined managed block — so the dest
-      // republishes it verbatim rather than racing it with a second version.
+    } else if (sourceTarget.id === 'claude' && target.instructionsFile === sourceTarget.instructionsFile) {
+      // The claude source's recorded root file is `AGENTS.md` (an `@AGENTS.md`
+      // shim CLAUDE.md), and this dest publishes to that same path. There is
+      // only one file on disk, and it is the claude target's instructions
+      // file: it carries the aspens import block and is what the shim points
+      // at. The dest therefore republishes the source's pending content as-is
+      // rather than racing it with a transformed second version that would
+      // undo the import layout on every run. Only the shared root file is
+      // exempt from transformation; skills and other files are still
+      // transformed for the dest. Any other source/dest pairing (including
+      // codex + opencode) keeps the regular transform + preserve path.
       const transformable = baseFiles.filter(f => f.path !== ASPENS_INDEX_PATH);
       const shared = transformable.find(f => f.path === sourceTarget.instructionsFile);
       files = transformForTarget(transformable.filter(f => f.path !== sourceTarget.instructionsFile), sourceTarget, target, {
@@ -243,6 +246,11 @@ function publishFilesForTargets(baseFiles, sourceTarget, publishTargets, scan, g
         graphSerialized,
         repoPath,
       });
+      // A directory-scoped dest (codex) re-reads the source root from disk
+      // and emits its own version even when nothing is pending; drop it so
+      // the on-disk file stays the source's, and parity sees the same slot
+      // on both sides only when the source actually publishes it.
+      files = files.filter(f => f.path !== target.instructionsFile);
       if (shared) files = [...files, shared];
     } else {
       // The aspens index is a Claude-only auxiliary imported via `@path`;
@@ -547,7 +555,7 @@ ${truncate(instructionsContent, 5000)}
       : (existsSync(instrPath) ? readFileSync(instrPath, 'utf8') : null);
 
     if (startContent != null) {
-      const { updated, indexFiles } = applyDeterministicInstructionSections(startContent, sourceTarget, existingSkills, repoPath, publishTargets);
+      const { updated, indexFiles } = applyDeterministicInstructionSections(startContent, sourceTarget, existingSkills, repoPath);
 
       if (updated !== startContent) {
         if (pending) pending.content = updated;
@@ -894,7 +902,7 @@ async function refreshAllSkills(repoPath, options, sourceTarget, publishTargets 
   if (existsSync(instrPath)) {
     const pending = allUpdatedFiles.find(f => f.path === instrFile);
     const startContent = pending ? pending.content : readFileSync(instrPath, 'utf8');
-    const { updated, indexFiles } = applyDeterministicInstructionSections(startContent, sourceTarget, existingSkills, repoPath, publishTargets);
+    const { updated, indexFiles } = applyDeterministicInstructionSections(startContent, sourceTarget, existingSkills, repoPath);
 
     if (updated !== startContent) {
       if (pending) pending.content = updated;

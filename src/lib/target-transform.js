@@ -350,12 +350,19 @@ export function buildAspensIndexContent(baseSkill, domainSkills, destTarget, has
  * those targets gets the same delimited block with the content inlined
  * instead (see ensureAspensManagedBlock).
  */
-export function ensureAspensImportBlock(content, indexRelPath = ASPENS_INDEX_PATH) {
+export function ensureAspensImportBlock(content, indexRelPath = ASPENS_INDEX_PATH, { migrateLegacySections = true } = {}) {
   let working = content || '';
-  working = working
-    .replace(/\n## Skills\s*\n[\s\S]*?(?=\n## |\n\*\*Last Updated|$)/i, '\n')
-    .replace(/\n## Behavior\s*\n[\s\S]*?(?=\n## |\n\*\*Last Updated|$)/i, '\n')
-    .replace(/(\n){3,}/g, '\n\n');
+  // The one-time migration only applies to a root file aspens itself used to
+  // inject into. Callers pass `migrateLegacySections: false` when the claude
+  // target's recorded root file is a hand-authored AGENTS.md (behind an
+  // `@AGENTS.md` shim), whose `## Skills`/`## Behavior` headings belong to
+  // the user and must survive byte-for-byte outside the delimited block.
+  if (migrateLegacySections) {
+    working = working
+      .replace(/\n## Skills\s*\n[\s\S]*?(?=\n## |\n\*\*Last Updated|$)/i, '\n')
+      .replace(/\n## Behavior\s*\n[\s\S]*?(?=\n## |\n\*\*Last Updated|$)/i, '\n')
+      .replace(/(\n){3,}/g, '\n\n');
+  }
 
   return replaceOrAppendAspensBlock(working, `@${indexRelPath}`);
 }

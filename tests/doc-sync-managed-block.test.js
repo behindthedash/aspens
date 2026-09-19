@@ -12,14 +12,15 @@
  *
  * With the claude target's instructions file resolved per repo, an `@AGENTS.md`
  * shim CLAUDE.md means claude records `AGENTS.md` — the same root file
- * opencode publishes to. The shim is never touched, the shared AGENTS.md gets
- * exactly one delimited block with the Skills/Behavior content inlined (opencode
- * cannot follow `@path` imports), and no orphaned `.claude/aspens-index.md` is
- * written.
+ * opencode (or codex) publishes to. The shim is never touched; the shared
+ * AGENTS.md is the claude target's instructions file and keeps the import
+ * layout (one delimited block importing `.claude/aspens-index.md`), so the
+ * two-hop chain CLAUDE.md -> AGENTS.md -> aspens-index.md is intact and the
+ * dest target never publishes a competing transformed version of that path.
  *
- * Both real paths run twice here: content outside the delimited aspens block
- * must be byte-for-byte unchanged in AGENTS.md, CLAUDE.md must be byte-for-byte
- * unchanged, and the second run must be a no-op.
+ * Both real paths run twice here for each dest target: content outside the
+ * delimited aspens block must be byte-for-byte unchanged in AGENTS.md,
+ * CLAUDE.md must be byte-for-byte unchanged, and the second run must be a no-op.
  */
 
 import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
@@ -56,13 +57,13 @@ const BLOCK_RE = /\n*<!-- aspens:start -->[\s\S]*?<!-- aspens:end -->\n?/g;
 const outsideBlock = (content) => content.replace(BLOCK_RE, '\n');
 const blocks = (content) => content.match(BLOCK_RE) || [];
 
-beforeEach(() => {
+function setupRepo(destTarget) {
   if (existsSync(REPO)) rmSync(REPO, { recursive: true, force: true });
   mkdirSync(join(REPO, '.claude', 'skills', 'base'), { recursive: true });
   mkdirSync(join(REPO, '.claude', 'skills', 'billing'), { recursive: true });
   writeFileSync(join(REPO, '.claude', 'skills', 'base', 'skill.md'), '---\nname: base\ndescription: Core conventions\n---\n\nBase.\n');
   writeFileSync(join(REPO, '.claude', 'skills', 'billing', 'skill.md'), '---\nname: billing\ndescription: Stripe billing flows\n---\n\nBilling.\n');
-  writeFileSync(join(REPO, '.aspens.json'), JSON.stringify({ targets: ['claude', 'opencode'], backend: 'claude' }) + '\n');
+  writeFileSync(join(REPO, '.aspens.json'), JSON.stringify({ targets: ['claude', destTarget], backend: 'claude' }) + '\n');
   writeFileSync(join(REPO, 'AGENTS.md'), AGENTS_MD);
   writeFileSync(join(REPO, 'CLAUDE.md'), CLAUDE_MD);
   writeFileSync(join(REPO, 'index.js'), 'export const a = 1;\n');
@@ -75,7 +76,7 @@ beforeEach(() => {
   // A code-bearing change so the commit-sync path reaches the LLM step.
   writeFileSync(join(REPO, 'index.js'), 'export const a = 2;\n');
   git('commit', '-q', '-am', 'change');
-});
+}
 
 afterAll(() => {
   if (existsSync(REPO)) rmSync(REPO, { recursive: true, force: true });
@@ -88,41 +89,55 @@ function assertPreserved() {
   expect(outsideBlock(agents).trimEnd()).toBe(AGENTS_MD.trimEnd());
   expect(blocks(agents)).toHaveLength(1);
   expect(agents).not.toMatch(/^@AGENTS\.md/m);
-  expect(agents).toContain('.claude/skills/billing/skill.md');
   expect(agents).not.toContain('.opencode/skills');
-  // The shared root file is read by opencode too, which cannot follow `@path`
-  // imports — the block must carry the content inline, not an index import.
-  expect(agents).not.toContain('@.claude/aspens-index.md');
-  expect(blocks(agents)[0]).toMatch(/## Skills/);
+  expect(agents).not.toContain('.agents/skills');
+  // AGENTS.md is the claude target's recorded instructions file: it keeps the
+  // import layout, never an inlined Skills/Behavior block, regardless of the
+  // dest target that shares the path.
+  expect(blocks(agents)[0]).toContain('@.claude/aspens-index.md');
+  expect(blocks(agents)[0]).not.toMatch(/## Skills/);
 
   // The `@AGENTS.md` shim is the recorded pointer, never a publish target.
   expect(claude).toBe(CLAUDE_MD);
   expect(blocks(claude)).toHaveLength(0);
 
-  // Nothing imports the index when the root file is shared — it must not be
-  // written as dead weight that dirties the tree on every sync.
-  expect(existsSync(join(REPO, '.claude', 'aspens-index.md'))).toBe(false);
+  // The index is imported from AGENTS.md, so it is written and current.
+  const index = readFileSync(join(REPO, '.claude', 'aspens-index.md'), 'utf8');
+  expect(index).toContain('.claude/skills/billing/skill.md');
 }
 
 async function runTwiceAndAssertIdempotent(options) {
+  const tracked = ['AGENTS.md', 'CLAUDE.md', '.claude/aspens-index.md'];
   await docSyncCommand(REPO, options);
   assertPreserved();
-  const snapshot = ['AGENTS.md', 'CLAUDE.md']
-    .map(f => readFileSync(join(REPO, f), 'utf8'));
+  const snapshot = tracked.map(f => readFileSync(join(REPO, f), 'utf8'));
 
   await docSyncCommand(REPO, options);
   assertPreserved();
-  const again = ['AGENTS.md', 'CLAUDE.md']
-    .map(f => readFileSync(join(REPO, f), 'utf8'));
+  const again = tracked.map(f => readFileSync(join(REPO, f), 'utf8'));
   expect(again).toEqual(snapshot);
 }
 
 describe('doc sync with targets [claude, opencode] and a hand-authored AGENTS.md', () => {
+  beforeEach(() => setupRepo('opencode'));
+
   it('commit-sync path keeps AGENTS.md and CLAUDE.md intact outside the aspens block', async () => {
     await runTwiceAndAssertIdempotent({ graph: false, commits: 1 });
   });
 
   it('--refresh path keeps AGENTS.md and CLAUDE.md intact outside the aspens block', async () => {
+    await runTwiceAndAssertIdempotent({ graph: false, refresh: true });
+  });
+});
+
+describe('doc sync with targets [claude, codex] and a hand-authored AGENTS.md', () => {
+  beforeEach(() => setupRepo('codex'));
+
+  it('commit-sync path keeps the claude import layout in the shared AGENTS.md', async () => {
+    await runTwiceAndAssertIdempotent({ graph: false, commits: 1 });
+  });
+
+  it('--refresh path keeps the claude import layout in the shared AGENTS.md', async () => {
     await runTwiceAndAssertIdempotent({ graph: false, refresh: true });
   });
 });
