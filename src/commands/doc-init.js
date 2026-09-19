@@ -11,7 +11,7 @@ import { persistGraphArtifacts } from '../lib/graph-persistence.js';
 import { installGitHook } from '../lib/git-hook.js';
 import { CliError } from '../lib/errors.js';
 import { resolveTimeout } from '../lib/timeout.js';
-import { TARGETS, resolveTarget, getAllowedPaths, writeConfig, loadConfig, mergeConfiguredTargets } from '../lib/target.js';
+import { TARGETS, resolveTarget, resolveClaudeTarget, getAllowedPaths, writeConfig, loadConfig, mergeConfiguredTargets, CLAUDE_INSTRUCTIONS_FILES } from '../lib/target.js';
 import { BACKENDS, detectAvailableBackends, resolveBackend } from '../lib/backend.js';
 import { transformForTarget, validateTransformedFiles, ensureRootKeyFilesSection, collectSkillsForList, ensureAspensImportBlock, buildAspensIndexContent, ASPENS_INDEX_PATH } from '../lib/target-transform.js';
 import { findSkillFiles } from '../lib/skill-reader.js';
@@ -123,21 +123,58 @@ export function looksLikeConversationalNonAnswer(content) {
 }
 
 // Canonical (Claude) vars for prompts — generation always uses Claude format.
-// Codex output is produced by transforming canonical output.
+// Codex output is produced by transforming canonical output. The root
+// instructions file name (CLAUDE.md vs AGENTS.md) is resolved per repo via
+// resolveClaudeTarget at the start of docInitCommand — see setClaudeTarget.
 const CANONICAL_VARS = {
-  skillsDir: '.claude/skills',
-  skillFilename: 'skill.md',
-  instructionsFile: 'CLAUDE.md',
-  configDir: '.claude',
+  skillsDir: TARGETS.claude.skillsDir,
+  skillFilename: TARGETS.claude.skillFilename,
+  instructionsFile: TARGETS.claude.instructionsFile,
+  configDir: TARGETS.claude.configDir,
 };
-const CANONICAL_ALLOWED_PATHS = getAllowedPaths([TARGETS.claude]);
 
 // Active backend for this run (set at start of docInitCommand, used by runLLM)
 let _backendId = 'claude';
 let _primaryTarget = TARGETS.claude;
+// The claude target resolved for this repo (instructionsFile may be AGENTS.md).
+// Canonical generation, path allow-listing, and the transform source all key
+// off this so a repo whose CLAUDE.md is an `@AGENTS.md` shim never has that
+// shim clobbered by generated content.
+let _claudeTarget = TARGETS.claude;
 let _allowedPaths = null;
 let _repoPath = null;
 let _reuseSourceTarget = null;
+
+function setClaudeTarget(target) {
+  _claudeTarget = target;
+  CANONICAL_VARS.instructionsFile = target.instructionsFile;
+  _allowedPaths = getAllowedPaths([target]);
+}
+
+function canonicalInstructionsFile() {
+  return _claudeTarget.instructionsFile;
+}
+
+/**
+ * Validate the --instructions-file option before any backend/LLM work runs.
+ * Only the claude target has a choice of root instructions file, so the
+ * option is rejected outright when the run does not generate for claude.
+ * @param {string|undefined} value
+ * @param {string[]|null} targetIds — resolved target ids, or null when not yet known
+ */
+export function validateInstructionsFileOption(value, targetIds = null) {
+  if (value === undefined || value === null) return;
+  if (typeof value !== 'string' || !CLAUDE_INSTRUCTIONS_FILES.includes(value)) {
+    throw new CliError(
+      `Invalid --instructions-file value: "${value}". Valid values: ${CLAUDE_INSTRUCTIONS_FILES.join(', ')}`
+    );
+  }
+  if (targetIds && !targetIds.includes('claude')) {
+    throw new CliError(
+      `--instructions-file only applies to the claude target (got --target ${targetIds.join(',')}). Drop the option or use --target claude.`
+    );
+  }
+}
 
 // Track token usage across all calls
 const tokenTracker = { promptTokens: 0, toolResultTokens: 0, output: 0, toolUses: 0, calls: 0 };
@@ -151,7 +188,7 @@ function baseArtifactLabel() {
 }
 
 function instructionsArtifactLabel() {
-  return isCodexPrimary() ? 'root AGENTS.md' : 'CLAUDE.md';
+  return isCodexPrimary() ? 'root AGENTS.md' : canonicalInstructionsFile();
 }
 
 function trackUsage(usage, promptLength) {
@@ -190,7 +227,7 @@ export function buildOutputFilesForTargets(canonicalFiles, targets, scan, graphS
 
   if (nonClaudeTargets.length > 0) {
     for (const target of nonClaudeTargets) {
-      const transformed = transformForTarget(canonicalFiles, TARGETS.claude, target, {
+      const transformed = transformForTarget(canonicalFiles, _claudeTarget, target, {
         scanResult: scan,
         graphSerialized,
         repoPath,
@@ -245,6 +282,10 @@ export async function docInitCommand(path, options) {
   const model = options.model || null;
   const recommended = !!options.recommended;
   const { config: existingConfig } = loadConfig(repoPath, { persist: false });
+
+  // Reject a bad --instructions-file before touching any backend or prompt.
+  validateInstructionsFileOption(options.instructionsFile, options.target ? [options.target] : null);
+  setClaudeTarget(TARGETS.claude);
 
   // --hooks-only: skip skill generation, just install/update hooks
   if (options.hooksOnly) {
@@ -373,12 +414,21 @@ export async function docInitCommand(path, options) {
       targetIds = [backend.id];
     }
   }
-  const targets = targetIds.map(id => resolveTarget(id));
+  validateInstructionsFileOption(options.instructionsFile, targetIds);
+  // Resolve the claude root instructions file once (override > .aspens.json >
+  // on-disk detection > CLAUDE.md) and use that target everywhere claude is
+  // generated for. Non-claude-only runs keep the stock claude definition as
+  // the canonical generation format.
+  const generatesClaude = targetIds.includes('claude');
+  setClaudeTarget(generatesClaude
+    ? resolveClaudeTarget(repoPath, { instructionsFile: options.instructionsFile })
+    : TARGETS.claude);
+  const targets = targetIds.map(id => (id === 'claude' ? _claudeTarget : resolveTarget(id)));
   assertNoTargetPathConflicts(targets);
   const primaryTarget = targets[0];
   _primaryTarget = primaryTarget;
-  _allowedPaths = null; // canonical generation uses defaults
   const persistedTargets = mergeConfiguredTargets(existingConfig?.targets, targetIds);
+  const persistedInstructionsFile = generatesClaude ? _claudeTarget.instructionsFile : undefined;
 
   // Persist the selected target/backend up front so a failed generation run
   // still updates repo config to reflect the user's explicit choice.
@@ -387,6 +437,7 @@ export async function docInitCommand(path, options) {
       targets: persistedTargets,
       backend: backend.id,
       saveTokens: existingConfig?.saveTokens,
+      instructionsFile: persistedInstructionsFile,
     });
   }
 
@@ -451,7 +502,7 @@ export async function docInitCommand(path, options) {
   const hasCodexDocs = scan.hasAgentsMd;
   const hasExistingDocs = hasClaudeDocs || hasCodexDocs;
   _reuseSourceTarget = disambiguateOpenCodeReuseSource(
-    chooseReuseSourceTarget(targets, hasClaudeDocs, hasCodexDocs, repoPath),
+    chooseReuseSourceTarget(targets, hasClaudeDocs, hasCodexDocs, repoPath, _claudeTarget),
     scan
   );
   let skipDiscovery = false;
@@ -608,7 +659,7 @@ export async function docInitCommand(path, options) {
     } else if (hasCodexDocs && isClaudeTarget && !hasClaudeDocs) {
       existingMsg = 'Existing Codex docs detected. Reuse them to generate Claude output?';
     } else if (hasClaudeDocs) {
-      existingMsg = 'Existing CLAUDE.md and/or skills detected. How to proceed:';
+      existingMsg = `Existing ${canonicalInstructionsFile()} and/or skills detected. How to proceed:`;
     } else {
       existingMsg = 'Existing AGENTS.md detected. How to proceed:';
     }
@@ -923,7 +974,7 @@ export async function docInitCommand(path, options) {
   }
 
   // Step 10: Persist target config
-  writeConfig(repoPath, { targets: persistedTargets, backend: backend.id, saveTokens: nextSaveTokensConfig });
+  writeConfig(repoPath, { targets: persistedTargets, backend: backend.id, saveTokens: nextSaveTokensConfig, instructionsFile: persistedInstructionsFile });
 
   console.log(pc.dim('  Verification: ') + [
     `${targets.map(t => t.label).join(' + ')} configured`,
@@ -1398,7 +1449,7 @@ export function assertNoTargetPathConflicts(targets) {
   }
 }
 
-export function chooseReuseSourceTarget(targets, hasClaudeDocs, hasCodexDocs, repoPath) {
+export function chooseReuseSourceTarget(targets, hasClaudeDocs, hasCodexDocs, repoPath, claudeTarget = TARGETS.claude) {
   const wantsClaude = targets.some(t => t.id === 'claude');
   const wantsCodex = targets.some(t => t.id === 'codex');
 
@@ -1406,17 +1457,17 @@ export function chooseReuseSourceTarget(targets, hasClaudeDocs, hasCodexDocs, re
   // to reuse — a stub import pointing at the other format's file is not
   // "existing docs" worth basing generation on.
   if (hasClaudeDocs && hasCodexDocs && repoPath) {
-    const claudeSubstantive = targetHasSubstantiveInstructions(repoPath, TARGETS.claude);
+    const claudeSubstantive = targetHasSubstantiveInstructions(repoPath, claudeTarget);
     const codexSubstantive = targetHasSubstantiveInstructions(repoPath, TARGETS.codex);
-    if (claudeSubstantive && !codexSubstantive) return TARGETS.claude;
+    if (claudeSubstantive && !codexSubstantive) return claudeTarget;
     if (codexSubstantive && !claudeSubstantive) return TARGETS.codex;
   }
 
-  if (hasClaudeDocs && !hasCodexDocs) return TARGETS.claude;
+  if (hasClaudeDocs && !hasCodexDocs) return claudeTarget;
   if (hasCodexDocs && !hasClaudeDocs) return TARGETS.codex;
-  if (wantsCodex && !wantsClaude && hasClaudeDocs) return TARGETS.claude;
+  if (wantsCodex && !wantsClaude && hasClaudeDocs) return claudeTarget;
   if (wantsClaude && !wantsCodex && hasCodexDocs) return TARGETS.codex;
-  if (hasClaudeDocs) return TARGETS.claude;
+  if (hasClaudeDocs) return claudeTarget;
   if (hasCodexDocs) return TARGETS.codex;
   return null;
 }
@@ -1600,7 +1651,7 @@ async function generateAllAtOnce(repoPath, scan, repoGraph, selectedDomains, tim
   // When improving, include existing content so Claude can build on it
   let existingSection = '';
   if (strategy === 'improve') {
-    existingSection = loadExistingDocsContext(repoPath, _reuseSourceTarget || TARGETS.claude, selectedDomains, {
+    existingSection = loadExistingDocsContext(repoPath, _reuseSourceTarget || _claudeTarget, selectedDomains, {
       includeInstructions: true,
       includeBase: true,
       includeDomains: true,
@@ -1612,7 +1663,7 @@ async function generateAllAtOnce(repoPath, scan, repoGraph, selectedDomains, tim
   const claudeSpinner = p.spinner();
   claudeSpinner.start('Exploring repo and generating skills...');
 
-  const instrFile = 'CLAUDE.md';
+  const instrFile = canonicalInstructionsFile();
   let existingContentLength = 0;
   if (strategy === 'improve' && _reuseSourceTarget?.instructionsFile) {
     try {
@@ -1638,16 +1689,16 @@ async function generateAllAtOnce(repoPath, scan, repoGraph, selectedDomains, tim
     const MAX_RETRIES = 2;
     for (let attempt = 0; attempt < MAX_RETRIES && (isMissing || isConversational || isDrasticLoss); attempt++) {
       const retryPrompt = isConversational
-        ? `Your previous response asked a clarifying question or hedged instead of generating the files. Do not ask questions — make your best judgment call and output the complete set of files now, each wrapped in <file path="...">...</file> tags, with CLAUDE.md starting with a markdown heading. Your previous (invalid) response was:\n\n${text}`
+        ? `Your previous response asked a clarifying question or hedged instead of generating the files. Do not ask questions — make your best judgment call and output the complete set of files now, each wrapped in <file path="...">...</file> tags, with ${instrFile} starting with a markdown heading. Your previous (invalid) response was:\n\n${text}`
         : isDrasticLoss
-          ? `Your previous response discarded most of the existing ${instrFile} content instead of preserving it — this is unacceptable data loss. Re-read the "## Existing" content in the original prompt and produce a CLAUDE.md that keeps essentially ALL of its real information (architecture, conventions, rules, commands), reorganizing or lightly editing only where genuinely needed. Output the complete set of files again, each wrapped in <file path="...">...</file> tags. Your previous (too-short) response was:\n\n${text}`
-          : `Your previous response did not include a <file path="CLAUDE.md">...</file> block among the generated files. Output the complete set of files again, including CLAUDE.md wrapped in exactly that tag format, starting with a markdown heading. Your previous output was:\n\n${text}`;
+          ? `Your previous response discarded most of the existing ${instrFile} content instead of preserving it — this is unacceptable data loss. Re-read the "## Existing" content in the original prompt and produce a ${instrFile} that keeps essentially ALL of its real information (architecture, conventions, rules, commands), reorganizing or lightly editing only where genuinely needed. Output the complete set of files again, each wrapped in <file path="...">...</file> tags. Your previous (too-short) response was:\n\n${text}`
+          : `Your previous response did not include a <file path="${instrFile}">...</file> block among the generated files. Output the complete set of files again, including ${instrFile} wrapped in exactly that tag format, starting with a markdown heading. Your previous output was:\n\n${text}`;
       claudeSpinner.message(
         isConversational
-          ? `CLAUDE.md looked like a question, not content — retry ${attempt + 1}/${MAX_RETRIES}...`
+          ? `${instrFile} looked like a question, not content — retry ${attempt + 1}/${MAX_RETRIES}...`
           : isDrasticLoss
-            ? `CLAUDE.md discarded too much existing content — retry ${attempt + 1}/${MAX_RETRIES}...`
-            : `CLAUDE.md missing from output — retry ${attempt + 1}/${MAX_RETRIES}...`
+            ? `${instrFile} discarded too much existing content — retry ${attempt + 1}/${MAX_RETRIES}...`
+            : `${instrFile} missing from output — retry ${attempt + 1}/${MAX_RETRIES}...`
       );
       const retry = await runLLM(retryPrompt, makeClaudeOptions(timeoutMs, verbose, model, null), _backendId);
       trackUsage(retry.usage, retryPrompt.length);
@@ -1660,7 +1711,7 @@ async function generateAllAtOnce(repoPath, scan, repoGraph, selectedDomains, tim
     }
 
     if (isMissing || isConversational || isDrasticLoss) {
-      p.log.warn(`Could not generate a valid CLAUDE.md after retries. Try: aspens doc init --strategy rewrite --mode base-only`);
+      p.log.warn(`Could not generate a valid ${instrFile} after retries. Try: aspens doc init --strategy rewrite --mode base-only`);
     }
 
     // Enforce skip-existing: filter out instructions file if it already exists
@@ -1716,7 +1767,7 @@ async function generateChunked(repoPath, scan, repoGraph, domains, baseOnly, tim
   let baseSkillContent = null;
   if (domainsOnly) {
     // Load existing base skill for context (used in domain prompts)
-    const baseTarget = _reuseSourceTarget || TARGETS.claude;
+    const baseTarget = _reuseSourceTarget || _claudeTarget;
     const existingBase = join(repoPath, baseTarget.skillsDir, 'base', baseTarget.skillFilename);
     if (existsSync(existingBase)) {
       baseSkillContent = readFileSync(existingBase, 'utf8');
@@ -1729,7 +1780,7 @@ async function generateChunked(repoPath, scan, repoGraph, domains, baseOnly, tim
   // When improving, include existing base skill content so Claude can build on it
   let existingBaseSection = '';
   if (strategy === 'improve') {
-    existingBaseSection = loadExistingDocsContext(repoPath, _reuseSourceTarget || TARGETS.claude, domains, {
+    existingBaseSection = loadExistingDocsContext(repoPath, _reuseSourceTarget || _claudeTarget, domains, {
       includeInstructions: false,
       includeBase: true,
       includeDomains: false,
@@ -1737,7 +1788,7 @@ async function generateChunked(repoPath, scan, repoGraph, domains, baseOnly, tim
   }
 
   const basePrompt = loadPrompt('doc-init', CANONICAL_VARS) + strategyNote +
-    `\n\n---\n\nGenerate ONLY the base skill for this repository at ${repoPath} (no domain skills, no CLAUDE.md). Today's date is ${today}.\n\n${scanSummary}\n\n${graphContext}${findingsSection}${existingBaseSection}`;
+    `\n\n---\n\nGenerate ONLY the base skill for this repository at ${repoPath} (no domain skills, no ${canonicalInstructionsFile()}). Today's date is ${today}.\n\n${scanSummary}\n\n${graphContext}${findingsSection}${existingBaseSection}`;
 
   // Generation always canonical — expected base skill path is always Claude format
   const expectedBasePath = '.claude/skills/base/skill.md';
@@ -1814,7 +1865,7 @@ async function generateChunked(repoPath, scan, repoGraph, domains, baseOnly, tim
           if (domain.name.includes('..') || domain.name.startsWith('/')) {
             return { domain: domain.name, files: [], success: false };
           }
-          existingDomainSection = loadExistingDocsContext(repoPath, _reuseSourceTarget || TARGETS.claude, [domain], {
+          existingDomainSection = loadExistingDocsContext(repoPath, _reuseSourceTarget || _claudeTarget, [domain], {
             includeInstructions: false,
             includeBase: false,
             includeDomains: true,
@@ -1880,7 +1931,8 @@ async function generateChunked(repoPath, scan, repoGraph, domains, baseOnly, tim
   }
 
   // 3. Generate CLAUDE.md (skip when retrying specific domains, or if strategy says so)
-  const claudeMdExists = existsSync(join(repoPath, 'CLAUDE.md'));
+  const instrFile = canonicalInstructionsFile();
+  const claudeMdExists = existsSync(join(repoPath, instrFile));
   if (allFiles.length > 0 && !domainsOnly && !(strategy === 'skip-existing' && claudeMdExists)) {
     const claudeMdSpinner = p.spinner();
     claudeMdSpinner.start(`Generating ${instructionsArtifactLabel()}...`);
@@ -1894,7 +1946,7 @@ async function generateChunked(repoPath, scan, repoGraph, domains, baseOnly, tim
     // When improving, include existing CLAUDE.md so Claude can build on it
     let existingClaudeMdSection = '';
     if (strategy === 'improve' && (_reuseSourceTarget?.instructionsFile || claudeMdExists)) {
-      existingClaudeMdSection = loadExistingDocsContext(repoPath, _reuseSourceTarget || TARGETS.claude, domains, {
+      existingClaudeMdSection = loadExistingDocsContext(repoPath, _reuseSourceTarget || _claudeTarget, domains, {
         includeInstructions: true,
         includeBase: false,
         includeDomains: false,
@@ -1915,7 +1967,7 @@ async function generateChunked(repoPath, scan, repoGraph, domains, baseOnly, tim
     try {
       let { text, usage } = await runLLM(claudeMdPrompt, makeClaudeOptions(timeoutMs, verbose, model, claudeMdSpinner), _backendId);
       trackUsage(usage, claudeMdPrompt.length);
-      let files = parseLLMOutput(text, _allowedPaths, 'CLAUDE.md', true);
+      let files = parseLLMOutput(text, _allowedPaths, instrFile, true);
       let isConversational = files.length > 0 && looksLikeConversationalNonAnswer(files[0].content);
       let isDrasticLoss = files.length > 0 && !isConversational && looksLikeDrasticContentLoss(files[0].content, existingContentLength);
 
@@ -1925,10 +1977,10 @@ async function generateChunked(repoPath, scan, repoGraph, domains, baseOnly, tim
       const MAX_RETRIES = 2;
       for (let attempt = 0; attempt < MAX_RETRIES && (files.length === 0 || isConversational || isDrasticLoss); attempt++) {
         const retryPrompt = isConversational
-          ? `Your previous response asked a clarifying question or hedged instead of generating the file. Do not ask questions — make your best judgment call and output the complete file now, wrapped in <file path="CLAUDE.md">...</file> tags, starting with a markdown heading. Your previous (invalid) response was:\n\n${text}`
+          ? `Your previous response asked a clarifying question or hedged instead of generating the file. Do not ask questions — make your best judgment call and output the complete file now, wrapped in <file path="${instrFile}">...</file> tags, starting with a markdown heading. Your previous (invalid) response was:\n\n${text}`
           : isDrasticLoss
-            ? `Your previous response discarded most of the existing content instead of preserving it — this is unacceptable data loss. Re-read the "## Existing ${instructionsArtifactLabel()}" content in the original prompt and produce a version that keeps essentially ALL of its real information (architecture, conventions, rules, commands), reorganizing or lightly editing only where genuinely needed. Do not summarize it down. Output the complete file now, wrapped in <file path="CLAUDE.md">...</file> tags. Your previous (too-short) response was:\n\n${text}`
-            : `Your previous response did not include the required <file path="...">content</file> XML tags. I need you to output CLAUDE.md wrapped in exactly this format:\n\n<file path="CLAUDE.md">\n# project-name\n[CLAUDE.md content]\n</file>\n\nHere is your previous output — please re-wrap it correctly:\n\n${text}`;
+            ? `Your previous response discarded most of the existing content instead of preserving it — this is unacceptable data loss. Re-read the "## Existing ${instructionsArtifactLabel()}" content in the original prompt and produce a version that keeps essentially ALL of its real information (architecture, conventions, rules, commands), reorganizing or lightly editing only where genuinely needed. Do not summarize it down. Output the complete file now, wrapped in <file path="${instrFile}">...</file> tags. Your previous (too-short) response was:\n\n${text}`
+            : `Your previous response did not include the required <file path="...">content</file> XML tags. I need you to output ${instrFile} wrapped in exactly this format:\n\n<file path="${instrFile}">\n# project-name\n[${instrFile} content]\n</file>\n\nHere is your previous output — please re-wrap it correctly:\n\n${text}`;
         claudeMdSpinner.message(
           isConversational
             ? `${instructionsArtifactLabel()} looked like a question, not content — retry ${attempt + 1}/${MAX_RETRIES}...`
@@ -1938,7 +1990,7 @@ async function generateChunked(repoPath, scan, repoGraph, domains, baseOnly, tim
         );
         const retry = await runLLM(retryPrompt, makeClaudeOptions(timeoutMs, verbose, model, null), _backendId);
         trackUsage(retry.usage, retryPrompt.length);
-        files = parseLLMOutput(retry.text, _allowedPaths, 'CLAUDE.md', true);
+        files = parseLLMOutput(retry.text, _allowedPaths, instrFile, true);
         isConversational = files.length > 0 && looksLikeConversationalNonAnswer(files[0].content);
         isDrasticLoss = files.length > 0 && !isConversational && looksLikeDrasticContentLoss(files[0].content, existingContentLength);
         text = retry.text;
@@ -1948,7 +2000,7 @@ async function generateChunked(repoPath, scan, repoGraph, domains, baseOnly, tim
         claudeMdSpinner.stop(pc.yellow(`${instructionsArtifactLabel()} — failed after retries`));
         p.log.warn(`Could not generate ${instructionsArtifactLabel()}. Try: aspens doc init --strategy rewrite --mode base-only`);
       } else {
-        const claudeBaseSkillPrefix = TARGETS.claude.skillsDir + '/base/';
+        const claudeBaseSkillPrefix = _claudeTarget.skillsDir + '/base/';
         // Merge on-disk skills with this run's pending ones — mirrors
         // transformToDirectoryScoped's collectSkillsForList, which the
         // codex/opencode targets already rely on. Without the on-disk merge,
@@ -1958,17 +2010,17 @@ async function generateChunked(repoPath, scan, repoGraph, domains, baseOnly, tim
         // `## Skills` section undercounts skills that already exist on disk
         // from an earlier successful pass.
         const { baseSkillForList, domainSkillsForList } = collectSkillsForList(
-          allFiles, allFiles.find(f => f.path.startsWith(claudeBaseSkillPrefix)), null, TARGETS.claude, repoPath,
+          allFiles, allFiles.find(f => f.path.startsWith(claudeBaseSkillPrefix)), null, _claudeTarget, repoPath,
         );
         files = files.map(file => {
-          if (file.path !== 'CLAUDE.md') return file;
+          if (file.path !== instrFile) return file;
           let content = ensureRootKeyFilesSection(file.content);
           content = ensureAspensImportBlock(content, ASPENS_INDEX_PATH);
           return { ...file, content };
         });
         files.push({
           path: ASPENS_INDEX_PATH,
-          content: buildAspensIndexContent(baseSkillForList, domainSkillsForList, TARGETS.claude, false),
+          content: buildAspensIndexContent(baseSkillForList, domainSkillsForList, _claudeTarget, false),
         });
         files = validateGeneratedChunk(files, repoPath);
         allFiles.push(...files);
