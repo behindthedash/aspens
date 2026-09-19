@@ -10,9 +10,16 @@
  * aspens import block; the --refresh path and the LLM commit-sync path
  * bypassed it.
  *
+ * With the claude target's instructions file resolved per repo, an `@AGENTS.md`
+ * shim CLAUDE.md means claude records `AGENTS.md` — the same root file
+ * opencode publishes to. The shim is never touched, the shared AGENTS.md gets
+ * exactly one delimited block with the Skills/Behavior content inlined (opencode
+ * cannot follow `@path` imports), and no orphaned `.claude/aspens-index.md` is
+ * written.
+ *
  * Both real paths run twice here: content outside the delimited aspens block
- * must be byte-for-byte unchanged in AGENTS.md and CLAUDE.md, and the second
- * run must be a no-op.
+ * must be byte-for-byte unchanged in AGENTS.md, CLAUDE.md must be byte-for-byte
+ * unchanged, and the second run must be a no-op.
  */
 
 import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
@@ -83,25 +90,29 @@ function assertPreserved() {
   expect(agents).not.toMatch(/^@AGENTS\.md/m);
   expect(agents).toContain('.claude/skills/billing/skill.md');
   expect(agents).not.toContain('.opencode/skills');
+  // The shared root file is read by opencode too, which cannot follow `@path`
+  // imports — the block must carry the content inline, not an index import.
+  expect(agents).not.toContain('@.claude/aspens-index.md');
+  expect(blocks(agents)[0]).toMatch(/## Skills/);
 
-  expect(outsideBlock(claude).trimEnd()).toBe(CLAUDE_MD.trimEnd());
-  expect(blocks(claude)).toHaveLength(1);
-  expect(claude).toContain('@.claude/aspens-index.md');
-  expect(claude).not.toMatch(/^## Skills/m);
+  // The `@AGENTS.md` shim is the recorded pointer, never a publish target.
+  expect(claude).toBe(CLAUDE_MD);
+  expect(blocks(claude)).toHaveLength(0);
 
-  const index = readFileSync(join(REPO, '.claude', 'aspens-index.md'), 'utf8');
-  expect(index).toContain('.claude/skills/billing/skill.md');
+  // Nothing imports the index when the root file is shared — it must not be
+  // written as dead weight that dirties the tree on every sync.
+  expect(existsSync(join(REPO, '.claude', 'aspens-index.md'))).toBe(false);
 }
 
 async function runTwiceAndAssertIdempotent(options) {
   await docSyncCommand(REPO, options);
   assertPreserved();
-  const snapshot = ['AGENTS.md', 'CLAUDE.md', '.claude/aspens-index.md']
+  const snapshot = ['AGENTS.md', 'CLAUDE.md']
     .map(f => readFileSync(join(REPO, f), 'utf8'));
 
   await docSyncCommand(REPO, options);
   assertPreserved();
-  const again = ['AGENTS.md', 'CLAUDE.md', '.claude/aspens-index.md']
+  const again = ['AGENTS.md', 'CLAUDE.md']
     .map(f => readFileSync(join(REPO, f), 'utf8'));
   expect(again).toEqual(snapshot);
 }

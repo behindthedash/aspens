@@ -63,7 +63,7 @@ function chooseSyncSourceTarget(repoPath, targets) {
     }
   }
 
-  return targets[0] || resolveClaudeTarget(repoPath);
+  return targets[0];
 }
 
 /**
@@ -127,15 +127,18 @@ function notifyLegacyHubBlockIfPresent(repoPath) {
  * Returns the list of written file results (empty when nothing needed updating).
  */
 export function repairDeterministicSections(repoPath, sourceTarget, publishTargets, scan, graphSerialized = null) {
-  sourceTarget = sourceTarget || resolveClaudeTarget(repoPath);
-  const instructionsFile = sourceTarget.instructionsFile || resolveClaudeTarget(repoPath).instructionsFile;
+  // Callers thread the repo-resolved targets from configuredTargets(); the
+  // resolver is only consulted here when a caller passes nothing.
+  sourceTarget ??= resolveClaudeTarget(repoPath);
+  publishTargets ??= [sourceTarget];
+  const { instructionsFile } = sourceTarget;
   const instrPath = join(repoPath, instructionsFile);
   if (!existsSync(instrPath)) return [];
 
   const existingSkills = findExistingSkills(repoPath, sourceTarget);
   const startContent = readFileSync(instrPath, 'utf8');
 
-  const { updated, indexFiles } = applyDeterministicInstructionSections(startContent, sourceTarget, existingSkills, repoPath);
+  const { updated, indexFiles } = applyDeterministicInstructionSections(startContent, sourceTarget, existingSkills, repoPath, publishTargets);
   if (updated === startContent && indexFiles.length === 0) return [];
 
   const baseFiles = [{ path: instructionsFile, content: updated }, ...indexFiles];
@@ -159,16 +162,29 @@ export function repairDeterministicSections(repoPath, sourceTarget, publishTarge
  * content untouched; a codex/opencode source has no `@path` import, so it
  * keeps the inline injection.
  *
+ * When the Claude target's recorded instructions file is `AGENTS.md` (an
+ * `@AGENTS.md` shim CLAUDE.md) and another configured target also publishes
+ * to that same root file, the file is shared with a target that cannot follow
+ * `@path` imports. The block is then inlined (ensureAspensManagedBlock) and no
+ * index file is emitted, so the shared file works for every reader and nothing
+ * orphaned is written.
+ *
  * Returns `{ updated, indexFiles }` — the new instructions content and the
  * index file to publish alongside it (empty when the index is already current).
  */
-function applyDeterministicInstructionSections(startContent, sourceTarget, existingSkills, repoPath) {
+function sharesInstructionsFile(sourceTarget, publishTargets) {
+  return (publishTargets || []).some(t => t.id !== sourceTarget.id && t.instructionsFile === sourceTarget.instructionsFile);
+}
+
+function applyDeterministicInstructionSections(startContent, sourceTarget, existingSkills, repoPath, publishTargets = []) {
   const baseSkillForList = existingSkills.find(s => s.name === 'base') || null;
   const domainSkillsForList = existingSkills.filter(s => s.name !== 'base');
 
   let updated = ensureRootKeyFilesSection(startContent);
   const indexFiles = [];
-  if (sourceTarget.id === 'claude') {
+  if (sourceTarget.id === 'claude' && sharesInstructionsFile(sourceTarget, publishTargets)) {
+    updated = ensureAspensManagedBlock(updated, baseSkillForList, domainSkillsForList, sourceTarget);
+  } else if (sourceTarget.id === 'claude') {
     updated = ensureAspensImportBlock(updated, ASPENS_INDEX_PATH);
     const newIndexContent = buildAspensIndexContent(baseSkillForList, domainSkillsForList, sourceTarget, false);
     const indexPath = join(repoPath, ASPENS_INDEX_PATH);
@@ -215,6 +231,19 @@ function publishFilesForTargets(baseFiles, sourceTarget, publishTargets, scan, g
     let files;
     if (target.id === sourceTarget.id) {
       files = [...baseFiles, ...buildDerivedCodexFiles(baseFiles, target, scan)];
+    } else if (target.instructionsFile === sourceTarget.instructionsFile) {
+      // Both targets publish the same root file (claude recorded as
+      // AGENTS.md next to opencode). The source owns that file — its pending
+      // content already carries the inlined managed block — so the dest
+      // republishes it verbatim rather than racing it with a second version.
+      const transformable = baseFiles.filter(f => f.path !== ASPENS_INDEX_PATH);
+      const shared = transformable.find(f => f.path === sourceTarget.instructionsFile);
+      files = transformForTarget(transformable.filter(f => f.path !== sourceTarget.instructionsFile), sourceTarget, target, {
+        scanResult: scan,
+        graphSerialized,
+        repoPath,
+      });
+      if (shared) files = [...files, shared];
     } else {
       // The aspens index is a Claude-only auxiliary imported via `@path`;
       // other targets get its content inlined in their managed block instead.
@@ -262,7 +291,7 @@ export async function docSyncCommand(path, options) {
   const sourceTarget = chooseSyncSourceTarget(repoPath, publishTargets);
   const backendId = config?.backend || sourceTarget.id;
   const allowedPaths = getAllowedPaths([sourceTarget]);
-  const skillsDir = sourceTarget.skillsDir ? join(repoPath, sourceTarget.skillsDir) : join(repoPath, resolveClaudeTarget(repoPath).skillsDir);
+  const skillsDir = join(repoPath, sourceTarget.skillsDir);
 
   if (recovered && config?.targets?.length) {
     p.log.warn(`Recovered missing .aspens.json from existing repo docs (${config.targets.join(', ')}).`);
@@ -281,7 +310,7 @@ export async function docSyncCommand(path, options) {
   }
 
   if (!existsSync(skillsDir)) {
-    throw new CliError(`No ${sourceTarget.skillsDir || '.claude/skills'}/ found. Run aspens doc init first.`);
+    throw new CliError(`No ${sourceTarget.skillsDir}/ found. Run aspens doc init first.`);
   }
 
   // Step 2: Get git diff
@@ -384,10 +413,10 @@ export async function docSyncCommand(path, options) {
   // Step 4: Build prompt
   const today = new Date().toISOString().split('T')[0];
   const targetVars = {
-    skillsDir: sourceTarget.skillsDir || '.claude/skills',
-    skillFilename: sourceTarget.skillFilename || 'skill.md',
-    instructionsFile: sourceTarget.instructionsFile || resolveClaudeTarget(repoPath).instructionsFile,
-    configDir: sourceTarget.configDir || '.claude',
+    skillsDir: sourceTarget.skillsDir,
+    skillFilename: sourceTarget.skillFilename,
+    instructionsFile: sourceTarget.instructionsFile,
+    configDir: sourceTarget.configDir,
   };
   const systemPrompt = loadPrompt('doc-sync', targetVars);
 
@@ -449,7 +478,7 @@ export async function docSyncCommand(path, options) {
     return `### ${s.path}\n${desc}`;
   }).join('\n\n');
 
-  const instructionsFile = sourceTarget.instructionsFile || resolveClaudeTarget(repoPath).instructionsFile;
+  const { instructionsFile } = sourceTarget;
   const instructionsContent = existsSync(join(repoPath, instructionsFile))
     ? readFileSync(join(repoPath, instructionsFile), 'utf8')
     : '';
@@ -518,7 +547,7 @@ ${truncate(instructionsContent, 5000)}
       : (existsSync(instrPath) ? readFileSync(instrPath, 'utf8') : null);
 
     if (startContent != null) {
-      const { updated, indexFiles } = applyDeterministicInstructionSections(startContent, sourceTarget, existingSkills, repoPath);
+      const { updated, indexFiles } = applyDeterministicInstructionSections(startContent, sourceTarget, existingSkills, repoPath, publishTargets);
 
       if (updated !== startContent) {
         if (pending) pending.content = updated;
@@ -685,8 +714,8 @@ function mapChangesToSkills(changedFiles, existingSkills, scan, repoGraph = null
 async function refreshAllSkills(repoPath, options, sourceTarget, publishTargets = null) {
   const verbose = !!options.verbose;
   const { config, recovered } = loadConfig(repoPath);
-  sourceTarget = sourceTarget || resolveClaudeTarget(repoPath);
-  publishTargets = publishTargets || [sourceTarget];
+  sourceTarget ??= resolveClaudeTarget(repoPath);
+  publishTargets ??= [sourceTarget];
   const backendId = config?.backend || sourceTarget.id;
   const allowedPaths = getAllowedPaths([sourceTarget]);
   let graphSerialized = null;
@@ -701,7 +730,7 @@ async function refreshAllSkills(repoPath, options, sourceTarget, publishTargets 
   if (!isGitRepo(repoPath)) {
     throw new CliError('Not a git repository.');
   }
-  const sd = sourceTarget?.skillsDir || '.claude/skills';
+  const sd = sourceTarget.skillsDir;
   const refreshSkillsDir = join(repoPath, sd);
   if (!existsSync(refreshSkillsDir)) {
     throw new CliError(`No ${sd}/ found. Run aspens doc init first.`);
@@ -726,7 +755,7 @@ async function refreshAllSkills(repoPath, options, sourceTarget, publishTargets 
   // Step 2: Load existing skills
   const existingSkills = findExistingSkills(repoPath, sourceTarget);
   if (existingSkills.length === 0) {
-    const sd = sourceTarget?.skillsDir || '.claude/skills';
+    const sd = sourceTarget.skillsDir;
     throw new CliError(`No skills found in ${sd}/. Run aspens doc init first.`);
   }
 
@@ -741,10 +770,10 @@ async function refreshAllSkills(repoPath, options, sourceTarget, publishTargets 
 
   const today = new Date().toISOString().split('T')[0];
   const refreshVars = {
-    skillsDir: sourceTarget?.skillsDir || '.claude/skills',
-    skillFilename: sourceTarget?.skillFilename || 'skill.md',
-    instructionsFile: sourceTarget.instructionsFile || resolveClaudeTarget(repoPath).instructionsFile,
-    configDir: sourceTarget?.configDir || '.claude',
+    skillsDir: sourceTarget.skillsDir,
+    skillFilename: sourceTarget.skillFilename,
+    instructionsFile: sourceTarget.instructionsFile,
+    configDir: sourceTarget.configDir,
   };
   const systemPrompt = loadPrompt('doc-sync-refresh', refreshVars);
   const allUpdatedFiles = [];
@@ -824,7 +853,7 @@ async function refreshAllSkills(repoPath, options, sourceTarget, publishTargets 
   }
 
   // Step 5: Refresh instructions file (CLAUDE.md or AGENTS.md) if it exists
-  const instrFile = sourceTarget.instructionsFile || resolveClaudeTarget(repoPath).instructionsFile;
+  const instrFile = sourceTarget.instructionsFile;
   const instrPath = join(repoPath, instrFile);
   if (existsSync(instrPath)) {
     const claudeSpinner = p.spinner();
@@ -865,7 +894,7 @@ async function refreshAllSkills(repoPath, options, sourceTarget, publishTargets 
   if (existsSync(instrPath)) {
     const pending = allUpdatedFiles.find(f => f.path === instrFile);
     const startContent = pending ? pending.content : readFileSync(instrPath, 'utf8');
-    const { updated, indexFiles } = applyDeterministicInstructionSections(startContent, sourceTarget, existingSkills, repoPath);
+    const { updated, indexFiles } = applyDeterministicInstructionSections(startContent, sourceTarget, existingSkills, repoPath, publishTargets);
 
     if (updated !== startContent) {
       if (pending) pending.content = updated;
