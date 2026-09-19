@@ -2,3 +2,10 @@
 # pre_pr_cmd mirrors the CI test job (.github/workflows/ci.yml) so the
 # mandatory pre-PR gate reflects the same signal CI will check.
 pre_pr_cmd: "npm test"
+
+# worktree_bootstrap_cmd: run once per fresh worktree right after
+# `git worktree add` (fanned-out task worktrees and queue-triage
+# propose/fold worktrees) — worktrees share `.git` but not the gitignored
+# root node_modules/, so without this `pre_pr_cmd` ("npm test") fails with
+# `vitest: not found` before it tests anything.
+worktree_bootstrap_cmd: "npm ci"
