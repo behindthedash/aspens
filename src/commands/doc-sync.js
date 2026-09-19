@@ -14,7 +14,7 @@ import { resolveTimeout } from '../lib/timeout.js';
 import { installGitHook, removeGitHook } from '../lib/git-hook.js';
 import { commitSyncOutput } from '../lib/sync-commit.js';
 import { isGitRepo, getGitRoot, getGitDiff, getGitLog, getChangedFiles } from '../lib/git-helpers.js';
-import { TARGETS, getAllowedPaths, loadConfig } from '../lib/target.js';
+import { TARGETS, CLAUDE_INSTRUCTIONS_FILES, getAllowedPaths, loadConfig, resolveClaudeTarget } from '../lib/target.js';
 import { getSelectedFilesDiff, buildPrioritizedDiff, truncate } from '../lib/diff-helpers.js';
 import { projectCodexDomainDocs, transformForTarget, assertTargetParity, syncSkillsSection, syncBehaviorSection, ensureRootKeyFilesSection, ensureAspensImportBlock, ensureAspensManagedBlock, buildAspensIndexContent, collectSkillsForList, ASPENS_INDEX_PATH } from '../lib/target-transform.js';
 import { isNoOpDiff } from '../lib/diff-classifier.js';
@@ -44,8 +44,10 @@ function configuredTargets(repoPath) {
   const targetIds = Array.isArray(config?.targets) && config.targets.length > 0
     ? config.targets
     : ['claude'];
+  // The claude target is resolved per repo so its instructionsFile reflects
+  // the name recorded in .aspens.json (CLAUDE.md or AGENTS.md).
   return targetIds
-    .map(id => TARGETS[id])
+    .map(id => (id === 'claude' ? resolveClaudeTarget(repoPath) : TARGETS[id]))
     .filter(Boolean);
 }
 
@@ -61,7 +63,7 @@ function chooseSyncSourceTarget(repoPath, targets) {
     }
   }
 
-  return targets[0] || TARGETS.claude;
+  return targets[0];
 }
 
 /**
@@ -99,7 +101,7 @@ async function regenerateStaleCodeMap(repoPath, sourceTarget, scan) {
 }
 
 function notifyLegacyHubBlockIfPresent(repoPath) {
-  const candidates = ['CLAUDE.md', 'AGENTS.md'];
+  const candidates = CLAUDE_INSTRUCTIONS_FILES;
   for (const file of candidates) {
     try {
       const content = readFileSync(join(repoPath, file), 'utf8');
@@ -125,7 +127,11 @@ function notifyLegacyHubBlockIfPresent(repoPath) {
  * Returns the list of written file results (empty when nothing needed updating).
  */
 export function repairDeterministicSections(repoPath, sourceTarget, publishTargets, scan, graphSerialized = null) {
-  const instructionsFile = sourceTarget?.instructionsFile || 'CLAUDE.md';
+  // Callers thread the repo-resolved targets from configuredTargets(); the
+  // resolver is only consulted here when a caller passes nothing.
+  sourceTarget ??= resolveClaudeTarget(repoPath);
+  publishTargets ??= [sourceTarget];
+  const { instructionsFile } = sourceTarget;
   const instrPath = join(repoPath, instructionsFile);
   if (!existsSync(instrPath)) return [];
 
@@ -156,6 +162,12 @@ export function repairDeterministicSections(repoPath, sourceTarget, publishTarge
  * content untouched; a codex/opencode source has no `@path` import, so it
  * keeps the inline injection.
  *
+ * The Claude source's recorded instructions file (`CLAUDE.md`, or `AGENTS.md`
+ * behind an `@AGENTS.md` shim) always keeps the import layout — the root file
+ * imports `.claude/aspens-index.md`, and the shim (when present) imports the
+ * root file — so the two-hop chain Claude Code loads is the same regardless of
+ * which other targets are configured.
+ *
  * Returns `{ updated, indexFiles }` — the new instructions content and the
  * index file to publish alongside it (empty when the index is already current).
  */
@@ -166,7 +178,11 @@ function applyDeterministicInstructionSections(startContent, sourceTarget, exist
   let updated = ensureRootKeyFilesSection(startContent);
   const indexFiles = [];
   if (sourceTarget.id === 'claude') {
-    updated = ensureAspensImportBlock(updated, ASPENS_INDEX_PATH);
+    // Legacy inline-section migration only targets the default CLAUDE.md;
+    // a recorded AGENTS.md is user-owned outside the delimited block.
+    updated = ensureAspensImportBlock(updated, ASPENS_INDEX_PATH, {
+      migrateLegacySections: sourceTarget.instructionsFile === TARGETS.claude.instructionsFile,
+    });
     const newIndexContent = buildAspensIndexContent(baseSkillForList, domainSkillsForList, sourceTarget, false);
     const indexPath = join(repoPath, ASPENS_INDEX_PATH);
     const currentIndexContent = existsSync(indexPath) ? readFileSync(indexPath, 'utf8') : null;
@@ -212,6 +228,30 @@ function publishFilesForTargets(baseFiles, sourceTarget, publishTargets, scan, g
     let files;
     if (target.id === sourceTarget.id) {
       files = [...baseFiles, ...buildDerivedCodexFiles(baseFiles, target, scan)];
+    } else if (sourceTarget.id === 'claude' && target.instructionsFile === sourceTarget.instructionsFile) {
+      // The claude source's recorded root file is `AGENTS.md` (an `@AGENTS.md`
+      // shim CLAUDE.md), and this dest publishes to that same path. There is
+      // only one file on disk, and it is the claude target's instructions
+      // file: it carries the aspens import block and is what the shim points
+      // at. The dest therefore republishes the source's pending content as-is
+      // rather than racing it with a transformed second version that would
+      // undo the import layout on every run. Only the shared root file is
+      // exempt from transformation; skills and other files are still
+      // transformed for the dest. Any other source/dest pairing (including
+      // codex + opencode) keeps the regular transform + preserve path.
+      const transformable = baseFiles.filter(f => f.path !== ASPENS_INDEX_PATH);
+      const shared = transformable.find(f => f.path === sourceTarget.instructionsFile);
+      files = transformForTarget(transformable.filter(f => f.path !== sourceTarget.instructionsFile), sourceTarget, target, {
+        scanResult: scan,
+        graphSerialized,
+        repoPath,
+      });
+      // A directory-scoped dest (codex) re-reads the source root from disk
+      // and emits its own version even when nothing is pending; drop it so
+      // the on-disk file stays the source's, and parity sees the same slot
+      // on both sides only when the source actually publishes it.
+      files = files.filter(f => f.path !== target.instructionsFile);
+      if (shared) files = [...files, shared];
     } else {
       // The aspens index is a Claude-only auxiliary imported via `@path`;
       // other targets get its content inlined in their managed block instead.
@@ -226,7 +266,7 @@ function publishFilesForTargets(baseFiles, sourceTarget, publishTargets, scan, g
     perTarget.set(target.id, dedupeFiles(files));
   }
 
-  assertTargetParity(perTarget);
+  assertTargetParity(perTarget, Object.fromEntries(publishTargets.map(t => [t.id, t])));
   return perTarget;
 }
 
@@ -259,7 +299,7 @@ export async function docSyncCommand(path, options) {
   const sourceTarget = chooseSyncSourceTarget(repoPath, publishTargets);
   const backendId = config?.backend || sourceTarget.id;
   const allowedPaths = getAllowedPaths([sourceTarget]);
-  const skillsDir = sourceTarget.skillsDir ? join(repoPath, sourceTarget.skillsDir) : join(repoPath, TARGETS.claude.skillsDir);
+  const skillsDir = join(repoPath, sourceTarget.skillsDir);
 
   if (recovered && config?.targets?.length) {
     p.log.warn(`Recovered missing .aspens.json from existing repo docs (${config.targets.join(', ')}).`);
@@ -278,7 +318,7 @@ export async function docSyncCommand(path, options) {
   }
 
   if (!existsSync(skillsDir)) {
-    throw new CliError(`No ${sourceTarget.skillsDir || '.claude/skills'}/ found. Run aspens doc init first.`);
+    throw new CliError(`No ${sourceTarget.skillsDir}/ found. Run aspens doc init first.`);
   }
 
   // Step 2: Get git diff
@@ -381,10 +421,10 @@ export async function docSyncCommand(path, options) {
   // Step 4: Build prompt
   const today = new Date().toISOString().split('T')[0];
   const targetVars = {
-    skillsDir: sourceTarget.skillsDir || '.claude/skills',
-    skillFilename: sourceTarget.skillFilename || 'skill.md',
-    instructionsFile: sourceTarget.instructionsFile || 'CLAUDE.md',
-    configDir: sourceTarget.configDir || '.claude',
+    skillsDir: sourceTarget.skillsDir,
+    skillFilename: sourceTarget.skillFilename,
+    instructionsFile: sourceTarget.instructionsFile,
+    configDir: sourceTarget.configDir,
   };
   const systemPrompt = loadPrompt('doc-sync', targetVars);
 
@@ -446,7 +486,7 @@ export async function docSyncCommand(path, options) {
     return `### ${s.path}\n${desc}`;
   }).join('\n\n');
 
-  const instructionsFile = sourceTarget.instructionsFile || 'CLAUDE.md';
+  const { instructionsFile } = sourceTarget;
   const instructionsContent = existsSync(join(repoPath, instructionsFile))
     ? readFileSync(join(repoPath, instructionsFile), 'utf8')
     : '';
@@ -679,11 +719,13 @@ function mapChangesToSkills(changedFiles, existingSkills, scan, repoGraph = null
 
 // --- Refresh mode ---
 
-async function refreshAllSkills(repoPath, options, sourceTarget, publishTargets = [sourceTarget]) {
+async function refreshAllSkills(repoPath, options, sourceTarget, publishTargets = null) {
   const verbose = !!options.verbose;
   const { config, recovered } = loadConfig(repoPath);
-  const backendId = config?.backend || sourceTarget?.id || 'claude';
-  const allowedPaths = getAllowedPaths([sourceTarget || TARGETS.claude]);
+  sourceTarget ??= resolveClaudeTarget(repoPath);
+  publishTargets ??= [sourceTarget];
+  const backendId = config?.backend || sourceTarget.id;
+  const allowedPaths = getAllowedPaths([sourceTarget]);
   let graphSerialized = null;
 
   p.intro(pc.cyan('aspens doc sync --refresh'));
@@ -696,7 +738,7 @@ async function refreshAllSkills(repoPath, options, sourceTarget, publishTargets 
   if (!isGitRepo(repoPath)) {
     throw new CliError('Not a git repository.');
   }
-  const sd = sourceTarget?.skillsDir || '.claude/skills';
+  const sd = sourceTarget.skillsDir;
   const refreshSkillsDir = join(repoPath, sd);
   if (!existsSync(refreshSkillsDir)) {
     throw new CliError(`No ${sd}/ found. Run aspens doc init first.`);
@@ -721,7 +763,7 @@ async function refreshAllSkills(repoPath, options, sourceTarget, publishTargets 
   // Step 2: Load existing skills
   const existingSkills = findExistingSkills(repoPath, sourceTarget);
   if (existingSkills.length === 0) {
-    const sd = sourceTarget?.skillsDir || '.claude/skills';
+    const sd = sourceTarget.skillsDir;
     throw new CliError(`No skills found in ${sd}/. Run aspens doc init first.`);
   }
 
@@ -736,10 +778,10 @@ async function refreshAllSkills(repoPath, options, sourceTarget, publishTargets 
 
   const today = new Date().toISOString().split('T')[0];
   const refreshVars = {
-    skillsDir: sourceTarget?.skillsDir || '.claude/skills',
-    skillFilename: sourceTarget?.skillFilename || 'skill.md',
-    instructionsFile: sourceTarget?.instructionsFile || 'CLAUDE.md',
-    configDir: sourceTarget?.configDir || '.claude',
+    skillsDir: sourceTarget.skillsDir,
+    skillFilename: sourceTarget.skillFilename,
+    instructionsFile: sourceTarget.instructionsFile,
+    configDir: sourceTarget.configDir,
   };
   const systemPrompt = loadPrompt('doc-sync-refresh', refreshVars);
   const allUpdatedFiles = [];
@@ -819,7 +861,7 @@ async function refreshAllSkills(repoPath, options, sourceTarget, publishTargets 
   }
 
   // Step 5: Refresh instructions file (CLAUDE.md or AGENTS.md) if it exists
-  const instrFile = sourceTarget?.instructionsFile || 'CLAUDE.md';
+  const instrFile = sourceTarget.instructionsFile;
   const instrPath = join(repoPath, instrFile);
   if (existsSync(instrPath)) {
     const claudeSpinner = p.spinner();

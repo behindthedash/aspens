@@ -2,6 +2,7 @@ import { mkdirSync, writeFileSync, existsSync } from 'fs';
 import { join, dirname, basename } from 'path';
 import { findSkillFiles, parseKeywords } from './skill-reader.js';
 import { sanitizePublishedContent, ASPENS_INDEX_PATH } from './target-transform.js';
+import { CLAUDE_INSTRUCTIONS_FILES } from './target.js';
 
 /**
  * Write parsed skill files to the target repo.
@@ -52,7 +53,7 @@ export function writeSkillFiles(repoPath, files, options = {}) {
 export function writeTransformedFiles(repoPath, files, options = {}) {
   const { force = false } = options;
   const results = [];
-  const allowedExact = new Set(['CLAUDE.md', 'AGENTS.md']);
+  const allowedExact = new Set(CLAUDE_INSTRUCTIONS_FILES);
   const allowedPrefixes = ['.claude/', '.agents/', '.codex/'];
 
   for (const file of files) {

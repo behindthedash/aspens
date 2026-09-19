@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { assertTargetParity, transformPathForTarget } from '../src/lib/target-transform.js';
+import { TARGETS } from '../src/lib/target.js';
 
 /**
  * Phase 4 — parity validator. Asserts that multi-target publishes don't
@@ -104,6 +105,45 @@ describe('assertTargetParity', () => {
       ]],
     ]);
     expect(() => assertTargetParity(map)).toThrow(/INSTRUCTIONS/);
+  });
+
+  describe('with repo-resolved targets (targetsById)', () => {
+    const claudeAsAgents = { ...TARGETS.claude, instructionsFile: 'AGENTS.md' };
+
+    it('classifies the recorded AGENTS.md as INSTRUCTIONS for claude', () => {
+      const map = new Map([
+        ['claude', [
+          { path: 'AGENTS.md', content: '' },
+          { path: '.claude/skills/billing/skill.md', content: '' },
+        ]],
+        ['opencode', [
+          { path: 'AGENTS.md', content: '' },
+          { path: '.claude/skills/billing/skill.md', content: '' },
+        ]],
+      ]);
+      expect(() => assertTargetParity(map, { claude: claudeAsAgents, opencode: TARGETS.opencode })).not.toThrow();
+      // Without the resolved target the static default would misclassify it.
+      expect(() => assertTargetParity(map)).toThrow(/parity violation/);
+    });
+
+    it('still detects a missing root instructions slot under resolved targets', () => {
+      const map = new Map([
+        ['claude', [{ path: '.claude/skills/billing/skill.md', content: '' }]],
+        ['opencode', [
+          { path: 'AGENTS.md', content: '' },
+          { path: '.claude/skills/billing/skill.md', content: '' },
+        ]],
+      ]);
+      expect(() => assertTargetParity(map, { claude: claudeAsAgents, opencode: TARGETS.opencode })).toThrow(/INSTRUCTIONS/);
+    });
+
+    it('falls back to the static TARGETS entry for ids missing from targetsById', () => {
+      const map = new Map([
+        ['claude', [{ path: 'AGENTS.md', content: '' }]],
+        ['codex', [{ path: 'AGENTS.md', content: '' }]],
+      ]);
+      expect(() => assertTargetParity(map, { claude: claudeAsAgents })).not.toThrow();
+    });
   });
 
   it('skips unknown target ids without throwing', () => {

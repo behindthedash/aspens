@@ -56,6 +56,14 @@ You are working on **multi-target output support** — the system that lets aspe
 - **Config validation is defensive** — `readConfig()` treats malformed but parseable JSON (e.g., wrong types for `targets`/`backend`/`version`/`saveTokens`) as invalid and returns `null`, same as missing config.
 - **`repoPath` context is required for disk fallback** — callers of `transformForTarget` must pass `repoPath` in the context object for `instructionsFile` to load from disk when not in canonical files, and for `collectSkillsForList` to enumerate on-disk skills.
 
+## Claude Instructions File Resolution
+- **Dual-format support:** Claude target supports two root instruction file names: `CLAUDE.md` (historical default) and `AGENTS.md` (when repo uses a shim or imports AGENTS.md directly).
+- **Shim detection:** A `CLAUDE.md` is a pure `@AGENTS.md` shim when, after removing HTML comments and blank lines, exactly one line remains: `@AGENTS.md` or `@./AGENTS.md`. Any other content (headings, prose, second import) means CLAUDE.md carries its own instructions and is NOT a shim.
+- **Detection cascade:** `detectClaudeInstructionsFile(repoPath)` resolves the correct filename by: (1) if CLAUDE.md exists and is NOT a shim → 'CLAUDE.md'; (2) if CLAUDE.md is a shim (whether or not AGENTS.md exists), or CLAUDE.md is absent and AGENTS.md exists → 'AGENTS.md'; (3) if neither exists → 'CLAUDE.md'.
+- **Config persistence:** `.aspens.json` stores an optional `instructionsFile` field (one of `CLAUDE_INSTRUCTIONS_FILES = ['CLAUDE.md', 'AGENTS.md']`). `isValidConfig()` validates the field; `writeConfig()` preserves it.
+- **Resolver precedence:** `resolveClaudeTarget(repoPath, { instructionsFile } = {})` returns the claude target with resolved `instructionsFile` by precedence: explicit override > `.aspens.json` `instructionsFile` > on-disk detection > 'CLAUDE.md'. Throws `Error` for invalid override values.
+- **Shim preservation:** When a repo uses a shim `CLAUDE.md` with `@AGENTS.md`, all aspens operations (doc-init, doc-sync, doc-impact) read from and write to `AGENTS.md` while leaving the shim byte-for-byte unchanged. The aspens import block (for `.claude/aspens-index.md`) is written to `AGENTS.md`, not the shim.
+
 ## References
 - **Patterns:** See `src/lib/target.js` for all target property definitions
 

@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync, existsSync, rmSync } from 'fs';
 import { join, dirname, normalize, resolve, relative, sep } from 'path';
 import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
+import { TARGETS } from './target.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROMPTS_DIR = join(__dirname, '..', 'prompts');
@@ -11,7 +12,7 @@ let codexExecCapabilities = null;
 
 // Default paths that parseFileOutput is allowed to write to
 const DEFAULT_ALLOWED_DIR_PREFIXES = ['.claude/'];
-const DEFAULT_ALLOWED_EXACT_FILES = ['CLAUDE.md'];
+const DEFAULT_ALLOWED_EXACT_FILES = [TARGETS.claude.instructionsFile];
 
 /**
  * Check if claude CLI is available.

@@ -1,6 +1,7 @@
 import { readFileSync, existsSync, readdirSync, statSync } from 'fs';
 import { join, basename, extname, relative } from 'path';
 import { SOURCE_EXTS } from './source-exts.js';
+import { TARGETS } from './target.js';
 
 /**
  * Scan a repository and return its tech stack, structure, and domains.
@@ -16,7 +17,7 @@ export function scanRepo(repoPath, { extraDomains } = {}) {
     domains: detectDomains(repoPath),
     entryPoints: detectEntryPoints(repoPath),
     hasClaudeConfig: existsSync(join(repoPath, '.claude')),
-    hasClaudeMd: existsSync(join(repoPath, 'CLAUDE.md')),
+    hasClaudeMd: existsSync(join(repoPath, TARGETS.claude.instructionsFile)),
     hasCodexConfig: existsSync(join(repoPath, '.codex')),
     hasAgentsMd: existsSync(join(repoPath, 'AGENTS.md')),
     hasAgentsSkills: existsSync(join(repoPath, '.agents/skills')),

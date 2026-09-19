@@ -165,6 +165,19 @@ describe('doc init on a repo whose CLAUDE.md is an @AGENTS.md shim', () => {
     expect(readConfig().instructionsFile).toBe('AGENTS.md');
   });
 
+  it('keeps a hand-authored ## Behavior section in AGENTS.md outside the aspens block', async () => {
+    const withBehavior = ROOT_DOC + '\n\n## Behavior\n\n- Hand-authored; must survive.';
+    mockRuns([wrap('AGENTS.md', withBehavior)]);
+
+    await docInitCommand(REPO, { ...baseOptions(), strategy: 'rewrite' });
+
+    const agents = read('AGENTS.md');
+    expect(agents).toContain('## Behavior');
+    expect(agents).toContain('- Hand-authored; must survive.');
+    expect(agents).toMatch(BLOCK_RE);
+    expect(read('CLAUDE.md')).toBe(SHIM_CLAUDE_MD);
+  });
+
   it('rejects <file path="CLAUDE.md"> output and retries until AGENTS.md is produced', async () => {
     const rootPrompts = mockRuns([
       wrap('CLAUDE.md', ROOT_DOC),

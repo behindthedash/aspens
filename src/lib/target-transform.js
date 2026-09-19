@@ -7,7 +7,7 @@
 
 import { join, relative } from 'path';
 import { readFileSync } from 'fs';
-import { TARGETS } from './target.js';
+import { TARGETS, CLAUDE_INSTRUCTIONS_FILES } from './target.js';
 import { CliError } from './errors.js';
 import { findSkillFiles, readFrontmatterScalar } from './skill-reader.js';
 
@@ -232,7 +232,7 @@ function buildRootInstructions(baseSkill, instructionsFile, domainSkills, graphS
   if (instructionsFile) {
     let content = instructionsFile.content;
     content = stripActivationSection(content);
-    content = remapContentPaths(content, { instructionsFile: 'CLAUDE.md', skillsDir: '.claude/skills', skillFilename: 'skill.md', configDir: '.claude' }, destTarget);
+    content = remapContentPaths(content, { instructionsFile: TARGETS.claude.instructionsFile, skillsDir: '.claude/skills', skillFilename: 'skill.md', configDir: '.claude' }, destTarget);
     if (destTarget.id === 'codex') {
       content = sanitizeCodexInstructions(content);
       content = syncSkillsSection(content, baseSkill, domainSkills, destTarget, !!graphSerialized);
@@ -350,12 +350,19 @@ export function buildAspensIndexContent(baseSkill, domainSkills, destTarget, has
  * those targets gets the same delimited block with the content inlined
  * instead (see ensureAspensManagedBlock).
  */
-export function ensureAspensImportBlock(content, indexRelPath = ASPENS_INDEX_PATH) {
+export function ensureAspensImportBlock(content, indexRelPath = ASPENS_INDEX_PATH, { migrateLegacySections = true } = {}) {
   let working = content || '';
-  working = working
-    .replace(/\n## Skills\s*\n[\s\S]*?(?=\n## |\n\*\*Last Updated|$)/i, '\n')
-    .replace(/\n## Behavior\s*\n[\s\S]*?(?=\n## |\n\*\*Last Updated|$)/i, '\n')
-    .replace(/(\n){3,}/g, '\n\n');
+  // The one-time migration only applies to a root file aspens itself used to
+  // inject into. Callers pass `migrateLegacySections: false` when the claude
+  // target's recorded root file is a hand-authored AGENTS.md (behind an
+  // `@AGENTS.md` shim), whose `## Skills`/`## Behavior` headings belong to
+  // the user and must survive byte-for-byte outside the delimited block.
+  if (migrateLegacySections) {
+    working = working
+      .replace(/\n## Skills\s*\n[\s\S]*?(?=\n## |\n\*\*Last Updated|$)/i, '\n')
+      .replace(/\n## Behavior\s*\n[\s\S]*?(?=\n## |\n\*\*Last Updated|$)/i, '\n')
+      .replace(/(\n){3,}/g, '\n\n');
+  }
 
   return replaceOrAppendAspensBlock(working, `@${indexRelPath}`);
 }
@@ -848,15 +855,18 @@ function logicalKeyForFile(filePath, target) {
  * Claude counterpart by design.
  *
  * @param {Map<string, Array<{path:string,content:string}>>} perTargetMap
+ * @param {Record<string, object>} [targetsById] — target definitions keyed by
+ *   id; pass repo-resolved targets (e.g. claude with `AGENTS.md`) so slot
+ *   classification uses the recorded instructions file. Defaults to TARGETS.
  * @throws {CliError} when targets diverge
  */
-export function assertTargetParity(perTargetMap) {
+export function assertTargetParity(perTargetMap, targetsById = TARGETS) {
   const targetIds = [...perTargetMap.keys()];
   if (targetIds.length < 2) return;
 
   const keysByTarget = new Map();
   for (const targetId of targetIds) {
-    const target = TARGETS[targetId];
+    const target = targetsById[targetId] || TARGETS[targetId];
     if (!target) continue;
     const keys = new Set();
     for (const file of perTargetMap.get(targetId) || []) {
@@ -899,9 +909,8 @@ export function validateTransformedFiles(files) {
     }
 
     const isKnownDocFile =
-      filePath.endsWith('AGENTS.md') ||
       filePath.endsWith('SKILL.md') ||
-      filePath.endsWith('CLAUDE.md');
+      CLAUDE_INSTRUCTIONS_FILES.some(name => filePath.endsWith(name));
     const isUnderSkillsDir =
       filePath.startsWith('.agents/skills/') ||
       filePath.startsWith('.claude/skills/');
