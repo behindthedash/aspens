@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 import { join, extname, relative } from 'path';
 import { scanRepo } from './scanner.js';
 import { buildRepoGraph } from './graph-builder.js';
-import { loadConfig, TARGETS } from './target.js';
+import { loadConfig, resolveClaudeTarget, TARGETS } from './target.js';
 import { findSkillFiles } from './skill-reader.js';
 import { getGitRoot } from './git-helpers.js';
 import { SOURCE_EXTS as SCANNER_SOURCE_EXTS } from './source-exts.js';
@@ -28,7 +28,12 @@ export async function analyzeImpact(repoPath, options = {}) {
   const scan = scanRepo(repoPath);
   const { config } = loadConfig(repoPath, { persist: false });
   const targetIds = config?.targets?.length ? config.targets : inferTargetsFromScan(scan);
-  const targets = targetIds.map(id => TARGETS[id]).filter(Boolean);
+  // The claude target's root instructions file is repo-specific (CLAUDE.md or
+  // AGENTS.md, per .aspens.json / on-disk detection), so resolve it per repo
+  // instead of using the static TARGETS.claude definition.
+  const targets = targetIds
+    .map(id => (id === 'claude' ? resolveClaudeTarget(repoPath) : TARGETS[id]))
+    .filter(Boolean);
   const sourceState = collectSourceState(repoPath);
 
   let graph = null;
