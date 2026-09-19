@@ -165,6 +165,7 @@ doc
   .option('--hooks-only', 'Skip doc generation, just install/update Claude hooks')
   .option('--no-graph', 'Skip import graph analysis')
   .option('--target <target>', 'Output target: claude, codex, opencode')
+  .option('--instructions-file <name>', 'Root instructions file for the claude target: CLAUDE.md or AGENTS.md')
   .option('--backend <backend>', 'Generation backend: claude, codex, opencode (default: matches target)')
   .option('--yes', 'Answer yes to write/hook confirmation prompts (for CI/scripted use)')
   .action(docInitCommand);
