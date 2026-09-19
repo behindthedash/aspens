@@ -2,6 +2,7 @@ import { readFileSync, existsSync, readdirSync, statSync } from 'fs';
 import { join, extname, relative } from 'path';
 import { execSync } from 'child_process';
 import { SOURCE_EXTS } from './source-exts.js';
+import { resolveClaudeTarget, CLAUDE_INSTRUCTIONS_FILES } from './target.js';
 
 /**
  * Build context string from a repo scan result.
@@ -113,7 +114,7 @@ export function buildContext(repoPath, scanResult, options = {}) {
   }
 
   // 7. Existing instructions file (CLAUDE.md or AGENTS.md) if present
-  const instructionsFile = options.instructionsFile || 'CLAUDE.md';
+  const instructionsFile = options.instructionsFile || resolveClaudeTarget(repoPath).instructionsFile;
   const instructionsPath = join(repoPath, instructionsFile);
   if (existsSync(instructionsPath)) {
     const content = readFileSafe(instructionsPath);
@@ -122,7 +123,11 @@ export function buildContext(repoPath, scanResult, options = {}) {
     }
   }
   // Also check alternative instructions files for improve strategy (both may exist)
-  const defaultAlternatives = instructionsFile === 'CLAUDE.md' ? ['AGENTS.md'] : ['CLAUDE.md'];
+  // When the primary is a claude name, the alternative is the other member of
+  // CLAUDE_INSTRUCTIONS_FILES (no alternatives otherwise).
+  const defaultAlternatives = CLAUDE_INSTRUCTIONS_FILES.includes(instructionsFile)
+    ? CLAUDE_INSTRUCTIONS_FILES.filter(name => name !== instructionsFile)
+    : [];
   const instructionAlternatives = options.instructionsAlternatives
     || (options.altInstructionsFile ? [options.altInstructionsFile] : defaultAlternatives);
   for (const altInstructionsFile of instructionAlternatives) {
