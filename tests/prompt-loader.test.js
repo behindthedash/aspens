@@ -73,4 +73,10 @@ describe('loadPrompt', () => {
     expect(domain).toContain('Preservation contract');
     expect(domain).not.toContain('{{preservation-contract}}');
   });
+
+  it('loads doc-init-claudemd with instructionsFile: AGENTS.md with no CLAUDE.md output-path reference', () => {
+    const prompt = loadPrompt('doc-init-claudemd', { instructionsFile: 'AGENTS.md' });
+    expect(prompt).toContain('<file path="AGENTS.md">');
+    expect(prompt).not.toMatch(/<file path="CLAUDE\.md">/);
+  });
 });
