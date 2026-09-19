@@ -9,3 +9,16 @@ pre_pr_cmd: "npm test"
 # root node_modules/, so without this `pre_pr_cmd` ("npm test") fails with
 # `vitest: not found` before it tests anything.
 worktree_bootstrap_cmd: "npm ci"
+
+# Auto-merge: fleet standard. max_risk is capped at medium in code
+# (high/critical are never eligible). target_branches empty = applies to the
+# base branch only.
+automerge:
+  enabled: true
+  max_risk: medium
+
+# protect-main is squash-only + linear history, so orchestrator merges into
+# main must squash (the repo-wide auto-detect would otherwise pick a merge
+# commit, which the ruleset rejects).
+merge_method_by_base:
+  main: squash
