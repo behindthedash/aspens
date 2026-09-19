@@ -170,6 +170,103 @@ export function paths(targetId) {
 }
 
 // ---------------------------------------------------------------------------
+// Claude instructions file resolution — CLAUDE.md vs AGENTS.md per repo
+// ---------------------------------------------------------------------------
+
+/**
+ * Root instructions file names the claude target may use. `CLAUDE.md` is the
+ * historical default; `AGENTS.md` is used by repos that keep a one-line
+ * `@AGENTS.md` shim in CLAUDE.md (or no CLAUDE.md at all) and put the real
+ * content in AGENTS.md.
+ */
+export const CLAUDE_INSTRUCTIONS_FILES = ['CLAUDE.md', 'AGENTS.md'];
+
+const HTML_COMMENT_RE = /<!--[\s\S]*?-->/g;
+const AGENTS_SHIM_IMPORT_RE = /^@(?:\.\/)?AGENTS\.md$/;
+
+/**
+ * True when a CLAUDE.md body is a pure `@AGENTS.md` shim: after dropping HTML
+ * comments and blank lines, exactly one line remains and it is `@AGENTS.md`
+ * or `@./AGENTS.md`. Any other content (headings, prose, a second import)
+ * means CLAUDE.md carries its own instructions and is NOT a shim.
+ * @param {string} content
+ * @returns {boolean}
+ */
+export function isAgentsMdShim(content) {
+  if (typeof content !== 'string') return false;
+  const lines = content
+    .replace(/^\uFEFF/, '')
+    .replace(HTML_COMMENT_RE, '')
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean);
+  return lines.length === 1 && AGENTS_SHIM_IMPORT_RE.test(lines[0]);
+}
+
+/**
+ * Detect which root instructions file the claude target should use in a repo
+ * by inspecting the files on disk (no `.aspens.json` involvement):
+ *   - CLAUDE.md present and NOT a shim        → 'CLAUDE.md'
+ *   - CLAUDE.md present and IS an `@AGENTS.md` shim → 'AGENTS.md'
+ *   - no CLAUDE.md, AGENTS.md present         → 'AGENTS.md'
+ *   - neither present                         → 'CLAUDE.md'
+ * @param {string} repoPath
+ * @returns {'CLAUDE.md'|'AGENTS.md'}
+ */
+export function detectClaudeInstructionsFile(repoPath) {
+  const claudeMdPath = join(repoPath, 'CLAUDE.md');
+  const agentsMdPath = join(repoPath, 'AGENTS.md');
+
+  if (existsSync(claudeMdPath)) {
+    let content = '';
+    try {
+      content = readFileSync(claudeMdPath, 'utf8');
+    } catch {
+      return 'CLAUDE.md';
+    }
+    return isAgentsMdShim(content) ? 'AGENTS.md' : 'CLAUDE.md';
+  }
+
+  if (existsSync(agentsMdPath)) return 'AGENTS.md';
+  return 'CLAUDE.md';
+}
+
+function isValidClaudeInstructionsFile(value) {
+  return typeof value === 'string' && CLAUDE_INSTRUCTIONS_FILES.includes(value);
+}
+
+/**
+ * Resolve the claude target for a specific repo, with `instructionsFile`
+ * chosen by precedence: explicit override > `.aspens.json` `instructionsFile`
+ * > on-disk detection > 'CLAUDE.md'. Returns a fresh object; `TARGETS.claude`
+ * is never mutated.
+ * @param {string} repoPath
+ * @param {{ instructionsFile?: string }} [options]
+ * @returns {object} claude target definition with the resolved `instructionsFile`
+ */
+export function resolveClaudeTarget(repoPath, { instructionsFile } = {}) {
+  let resolved;
+
+  if (instructionsFile !== undefined && instructionsFile !== null) {
+    if (!isValidClaudeInstructionsFile(instructionsFile)) {
+      throw new Error(
+        `Invalid instructions file: "${instructionsFile}". Valid values: ${CLAUDE_INSTRUCTIONS_FILES.join(', ')}`
+      );
+    }
+    resolved = instructionsFile;
+  } else {
+    const config = readConfig(repoPath);
+    if (config && isValidClaudeInstructionsFile(config.instructionsFile)) {
+      resolved = config.instructionsFile;
+    } else {
+      resolved = detectClaudeInstructionsFile(repoPath);
+    }
+  }
+
+  return { ...TARGETS.claude, instructionsFile: resolved };
+}
+
+// ---------------------------------------------------------------------------
 // Config persistence — .aspens.json at repo root
 // ---------------------------------------------------------------------------
 
@@ -227,7 +324,7 @@ function isValidSaveTokensConfig(config) {
 function isValidConfig(config) {
   if (!config || typeof config !== 'object' || Array.isArray(config)) return false;
 
-  const { targets, backend, version, saveTokens } = config;
+  const { targets, backend, version, saveTokens, instructionsFile } = config;
 
   if (!Array.isArray(targets) || targets.length === 0) return false;
   if (!targets.every(target => typeof target === 'string' && Object.prototype.hasOwnProperty.call(TARGETS, target))) {
@@ -238,6 +335,7 @@ function isValidConfig(config) {
   }
   if (version !== undefined && typeof version !== 'string') return false;
   if (saveTokens !== undefined && !isValidSaveTokensConfig(saveTokens)) return false;
+  if (instructionsFile !== undefined && !isValidClaudeInstructionsFile(instructionsFile)) return false;
 
   return true;
 }
@@ -245,7 +343,7 @@ function isValidConfig(config) {
 /**
  * Write aspens config to .aspens.json.
  * @param {string} repoPath
- * @param {object} config — { targets: string[], backend?: string }
+ * @param {object} config — { targets: string[], backend?: string, instructionsFile?: 'CLAUDE.md'|'AGENTS.md' }
  */
 export function writeConfig(repoPath, config) {
   const configPath = join(repoPath, CONFIG_FILE);
@@ -261,19 +359,33 @@ export function writeConfig(repoPath, config) {
   if (saveTokens !== undefined && saveTokens !== null) {
     data.saveTokens = saveTokens;
   }
+  // Preserve the recorded claude instructions file unless the caller passes a
+  // new value; pass instructionsFile: null to explicitly drop it.
+  const instructionsFile = config.instructionsFile === undefined
+    ? existing?.instructionsFile
+    : config.instructionsFile;
+  if (instructionsFile !== undefined && instructionsFile !== null) {
+    if (!isValidClaudeInstructionsFile(instructionsFile)) {
+      throw new Error(
+        `Invalid instructions file: "${instructionsFile}". Valid values: ${CLAUDE_INSTRUCTIONS_FILES.join(', ')}`
+      );
+    }
+    data.instructionsFile = instructionsFile;
+  }
   writeFileSync(configPath, JSON.stringify(data, null, 2) + '\n');
 }
 
 /**
  * Infer target config from generated repo artifacts when .aspens.json is missing.
  * @param {string} repoPath
- * @returns {{ targets: string[], backend: string|null, version: string } | null}
+ * @returns {{ targets: string[], backend: string|null, version: string, instructionsFile?: 'AGENTS.md' } | null}
  */
 export function inferConfig(repoPath) {
+  const hasClaudeMd = existsSync(join(repoPath, TARGETS.claude.instructionsFile || 'CLAUDE.md'));
   const hasClaudeArtifacts =
     existsSync(join(repoPath, TARGETS.claude.configDir || '.claude')) ||
     existsSync(join(repoPath, TARGETS.claude.skillsDir || '.claude/skills')) ||
-    existsSync(join(repoPath, TARGETS.claude.instructionsFile || 'CLAUDE.md'));
+    hasClaudeMd;
 
   const hasCodexConfig = existsSync(join(repoPath, TARGETS.codex.configDir || '.codex'));
   const hasCodexSkills = existsSync(join(repoPath, TARGETS.codex.skillsDir || '.agents/skills'));
@@ -301,11 +413,20 @@ export function inferConfig(repoPath) {
 
   if (targets.length === 0) return null;
 
-  return {
+  const inferred = {
     targets,
     backend: null,
     version: '1.0',
   };
+
+  // A claude repo whose root instructions live in AGENTS.md (no CLAUDE.md, or
+  // only an `@AGENTS.md` shim) must record that so later runs don't fall back
+  // to creating/clobbering CLAUDE.md. CLAUDE.md stays the implicit default.
+  if (hasClaudeArtifacts && detectClaudeInstructionsFile(repoPath) === 'AGENTS.md') {
+    inferred.instructionsFile = 'AGENTS.md';
+  }
+
+  return inferred;
 }
 
 /**
