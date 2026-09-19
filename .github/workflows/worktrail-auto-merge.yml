@@ -1,0 +1,58 @@
+name: "CI: Auto-merge on open"
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, labeled, unlabeled]
+
+# A `labeled` run must never cancel an in-flight opened/reopened/ready_for_review
+# run for the same PR -- a cancelled run of a required check stays on the head
+# SHA and blocks the merge/auto-merge even after a newer run succeeds. The label
+# name is included too: a PR opened with two `gh pr create --label` flags fires
+# two separate `labeled` events that would otherwise share one group and cancel
+# each other.
+concurrency:
+  group: worktrail-auto-merge-${{ github.event.pull_request.number }}-${{ github.event.action }}-${{ github.event.label.name || '' }}
+  cancel-in-progress: true
+
+jobs:
+  auto-merge:
+    # Never attempt auto-merge on a draft PR -- GitHub rejects it.
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: write
+    steps:
+      - name: Check automerge eligibility
+        id: check-automerge
+        run: |
+          labels=$(gh pr view "${{ github.event.pull_request.number }}" \
+            --json labels --jq '.labels[].name' -R "${{ github.repository }}")
+          eligible="false"
+          if echo "$labels" | grep -qE "^go:risk-(low|medium)$" \
+              && ! echo "$labels" | grep -q "^go:no-automerge$"; then
+            eligible="true"
+          fi
+          echo "eligible=$eligible" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Native GitHub auto-merge persists once armed regardless of later label
+      # changes -- disarming on every ineligible re-check is what actually
+      # stops a merge that an earlier, more permissive trigger already armed.
+      # `|| true` because disarming a PR that was never armed is a no-op.
+      - name: Disarm on ineligible
+        if: steps.check-automerge.outputs.eligible != 'true'
+        run: gh pr merge --disable-auto "${{ github.event.pull_request.number }}" -R "${{ github.repository }}" || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Arm auto-merge
+        if: steps.check-automerge.outputs.eligible == 'true'
+        run: |
+          if [ "${{ github.event.pull_request.base.ref }}" = "dev" ] || [ "${{ github.event.pull_request.base.ref }}" = "main" ]; then
+            gh pr merge --auto --squash "${{ github.event.pull_request.number }}" -R "${{ github.repository }}"
+          else
+            gh pr merge --auto --merge "${{ github.event.pull_request.number }}" -R "${{ github.repository }}"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
