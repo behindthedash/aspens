@@ -55,6 +55,8 @@ You are working on **aspens' skill generation pipeline** — the system that sca
 - **Incremental write deduplication** — `writeIncrementalOutputs()` skips files whose content hasn't changed since last write, using `contentsByPath` Map for tracking. Directory-scoped `AGENTS.md` files (path ends with `/AGENTS.md` but not the root `AGENTS.md`) go through `writeTransformedFiles()`, all others through `writeSkillFiles()`.
 - **Read-only LLM tools** — generation calls always pass `allowedTools: ['Read', 'Glob', 'Grep']`. The LLM explores the repo itself; aspens never lets it write.
 - **`AGENTS.md` post-processing** — generated instructions files are run through `ensureRootKeyFilesSection()`, `syncSkillsSection()`, and `syncBehaviorSection()` so aspens owns the Skills list and Behavior block deterministically; prompts explicitly forbid the LLM from emitting these sections.
+- **Dual-format instructions file:** `--instructions-file` option (CLI) and `instructionsFile` (`.aspens.json` config field) determine which root file (CLAUDE.md or AGENTS.md) is generated and persisted. The option validates against `CLAUDE_INSTRUCTIONS_FILES = ['CLAUDE.md', 'AGENTS.md']` and overrides config/detection. A shim CLAUDE.md is never overwritten — only `AGENTS.md` is written to when a shim is detected.
+- **Shim preservation in doc-init:** When generating with `--instructions-file AGENTS.md` or when a shim `CLAUDE.md` is detected, doc-init writes the aspens import block to `AGENTS.md` only, leaving any shim in place. Prompts receive the resolved filename in `CANONICAL_VARS.instructionsFile`.
 
 ## References
 - **Prompts:** `src/prompts/doc-init*.md`, `src/prompts/discover-*.md`

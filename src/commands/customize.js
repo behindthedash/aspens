@@ -6,7 +6,7 @@ import { runClaude, loadPrompt, parseFileOutput } from '../lib/runner.js';
 import { writeSkillFiles } from '../lib/skill-writer.js';
 import { CliError } from '../lib/errors.js';
 import { resolveTimeout } from '../lib/timeout.js';
-import { readConfig } from '../lib/target.js';
+import { readConfig, resolveClaudeTarget } from '../lib/target.js';
 import { isInteractive, failNonInteractive } from '../lib/interactive.js';
 
 const READ_ONLY_TOOLS = ['Read', 'Glob', 'Grep'];
@@ -234,13 +234,14 @@ function findAgents(agentsDir, repoPath) {
 function gatherProjectContext(repoPath) {
   const parts = [];
 
-  // CLAUDE.md
-  const claudeMdPath = join(repoPath, 'CLAUDE.md');
+  // Root instructions file (CLAUDE.md, or AGENTS.md when the repo keeps its instructions there)
+  const { instructionsFile } = resolveClaudeTarget(repoPath);
+  const claudeMdPath = join(repoPath, instructionsFile);
   if (existsSync(claudeMdPath)) {
     const content = readFileSync(claudeMdPath, 'utf8');
     // Truncate to key sections
     const truncated = content.length > 3000 ? content.slice(0, 3000) + '\n...(truncated)' : content;
-    parts.push(`### CLAUDE.md\n\`\`\`\n${truncated}\n\`\`\``);
+    parts.push(`### ${instructionsFile}\n\`\`\`\n${truncated}\n\`\`\``);
   }
 
   // Skills

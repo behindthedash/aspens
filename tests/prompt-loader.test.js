@@ -26,6 +26,13 @@ describe('loadPrompt', () => {
     expect(prompt).toContain('Preserve');
   });
 
+  it('doc-sync prompt names the resolved instructions file and never CLAUDE.md for AGENTS.md', () => {
+    const prompt = loadPrompt('doc-sync', { instructionsFile: 'AGENTS.md' });
+    expect(prompt).toContain('<file path="AGENTS.md">');
+    expect(prompt).not.toContain('CLAUDE.md');
+    expect(prompt).not.toContain('{{instructionsFile}}');
+  });
+
   it('loads doc-init-domain prompt with variables', () => {
     const prompt = loadPrompt('doc-init-domain', { domainName: 'billing' });
     expect(prompt).toContain('billing');

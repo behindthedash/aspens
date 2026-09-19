@@ -141,3 +141,42 @@ describe('doc sync with targets [claude, codex] and a hand-authored AGENTS.md', 
     await runTwiceAndAssertIdempotent({ graph: false, refresh: true });
   });
 });
+
+describe('doc sync with the claude target recording AGENTS.md as its instructions file', () => {
+  function setupClaudeOnly({ claudeMd, agentsMd }) {
+    setupRepo('codex');
+    writeFileSync(join(REPO, '.aspens.json'), JSON.stringify({ targets: ['claude'], backend: 'claude', instructionsFile: 'AGENTS.md' }) + '\n');
+    rmSync(join(REPO, 'CLAUDE.md'), { force: true });
+    if (claudeMd !== null) writeFileSync(join(REPO, 'CLAUDE.md'), claudeMd);
+    if (agentsMd === null) rmSync(join(REPO, 'AGENTS.md'), { force: true });
+  }
+
+  it('commit-sync repair fixes AGENTS.md and leaves a shim CLAUDE.md byte-identical', async () => {
+    setupClaudeOnly({ claudeMd: CLAUDE_MD, agentsMd: AGENTS_MD });
+    await docSyncCommand(REPO, { graph: false, commits: 1 });
+
+    const agents = readFileSync(join(REPO, 'AGENTS.md'), 'utf8');
+    expect(outsideBlock(agents).trimEnd()).toBe(AGENTS_MD.trimEnd());
+    expect(blocks(agents)).toHaveLength(1);
+    expect(blocks(agents)[0]).toContain('@.claude/aspens-index.md');
+    expect(readFileSync(join(REPO, 'CLAUDE.md'), 'utf8')).toBe(CLAUDE_MD);
+  });
+
+  it('--refresh refreshes AGENTS.md without creating CLAUDE.md', async () => {
+    setupClaudeOnly({ claudeMd: null, agentsMd: AGENTS_MD });
+    await docSyncCommand(REPO, { graph: false, refresh: true });
+
+    const agents = readFileSync(join(REPO, 'AGENTS.md'), 'utf8');
+    expect(outsideBlock(agents).trimEnd()).toBe(AGENTS_MD.trimEnd());
+    expect(blocks(agents)).toHaveLength(1);
+    expect(existsSync(join(REPO, 'CLAUDE.md'))).toBe(false);
+  });
+
+  it('a recorded AGENTS.md that was deleted makes no root change and creates no CLAUDE.md', async () => {
+    setupClaudeOnly({ claudeMd: null, agentsMd: null });
+    await docSyncCommand(REPO, { graph: false, refresh: true });
+
+    expect(existsSync(join(REPO, 'AGENTS.md'))).toBe(false);
+    expect(existsSync(join(REPO, 'CLAUDE.md'))).toBe(false);
+  });
+});

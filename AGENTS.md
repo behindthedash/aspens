@@ -22,7 +22,7 @@
 - `npm start` — run the CLI (`node bin/cli.js`)
 - `npm run lint` — run OXLint (`oxlint .`; `no-undef` is enforced via `.oxlintrc.json`)
 - `aspens scan [path]` — deterministic repo scan
-- `aspens doc init [path]` — generate skills, hooks, and instructions file (`--target claude|codex|all`, `--recommended` for full recommended setup including save-tokens, agents, and doc-sync hook)
+- `aspens doc init [path]` — generate skills, hooks, and instructions file (`--target claude|codex|all`, `--instructions-file CLAUDE.md|AGENTS.md` for claude target, `--recommended` for full recommended setup including save-tokens, agents, and doc-sync hook)
 - `aspens doc impact [path]` — show freshness, coverage, drift, and LLM interpretation of generated context (interactive apply for repairs)
 - `aspens doc sync [path]` — update docs from recent diffs
 - `aspens doc graph [path]` — rebuild `.agents/skills/architecture/references/code-map.md`

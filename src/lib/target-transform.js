@@ -7,7 +7,7 @@
 
 import { join, relative } from 'path';
 import { readFileSync } from 'fs';
-import { TARGETS } from './target.js';
+import { TARGETS, CLAUDE_INSTRUCTIONS_FILES } from './target.js';
 import { CliError } from './errors.js';
 import { findSkillFiles, readFrontmatterScalar } from './skill-reader.js';
 
@@ -232,7 +232,7 @@ function buildRootInstructions(baseSkill, instructionsFile, domainSkills, graphS
   if (instructionsFile) {
     let content = instructionsFile.content;
     content = stripActivationSection(content);
-    content = remapContentPaths(content, { instructionsFile: 'CLAUDE.md', skillsDir: '.claude/skills', skillFilename: 'skill.md', configDir: '.claude' }, destTarget);
+    content = remapContentPaths(content, { instructionsFile: TARGETS.claude.instructionsFile, skillsDir: '.claude/skills', skillFilename: 'skill.md', configDir: '.claude' }, destTarget);
     if (destTarget.id === 'codex') {
       content = sanitizeCodexInstructions(content);
       content = syncSkillsSection(content, baseSkill, domainSkills, destTarget, !!graphSerialized);
@@ -909,9 +909,8 @@ export function validateTransformedFiles(files) {
     }
 
     const isKnownDocFile =
-      filePath.endsWith('AGENTS.md') ||
       filePath.endsWith('SKILL.md') ||
-      filePath.endsWith('CLAUDE.md');
+      CLAUDE_INSTRUCTIONS_FILES.some(name => filePath.endsWith(name));
     const isUnderSkillsDir =
       filePath.startsWith('.agents/skills/') ||
       filePath.startsWith('.claude/skills/');

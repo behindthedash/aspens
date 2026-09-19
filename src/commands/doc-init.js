@@ -2015,7 +2015,11 @@ async function generateChunked(repoPath, scan, repoGraph, domains, baseOnly, tim
         files = files.map(file => {
           if (file.path !== instrFile) return file;
           let content = ensureRootKeyFilesSection(file.content);
-          content = ensureAspensImportBlock(content, ASPENS_INDEX_PATH);
+          // The legacy inline-section migration only applies to a CLAUDE.md aspens
+          // used to inject into; a recorded AGENTS.md is the user's own file.
+          content = ensureAspensImportBlock(content, ASPENS_INDEX_PATH, {
+            migrateLegacySections: _claudeTarget.instructionsFile === TARGETS.claude.instructionsFile,
+          });
           return { ...file, content };
         });
         files.push({
