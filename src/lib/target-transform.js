@@ -848,15 +848,18 @@ function logicalKeyForFile(filePath, target) {
  * Claude counterpart by design.
  *
  * @param {Map<string, Array<{path:string,content:string}>>} perTargetMap
+ * @param {Record<string, object>} [targetsById] — target definitions keyed by
+ *   id; pass repo-resolved targets (e.g. claude with `AGENTS.md`) so slot
+ *   classification uses the recorded instructions file. Defaults to TARGETS.
  * @throws {CliError} when targets diverge
  */
-export function assertTargetParity(perTargetMap) {
+export function assertTargetParity(perTargetMap, targetsById = TARGETS) {
   const targetIds = [...perTargetMap.keys()];
   if (targetIds.length < 2) return;
 
   const keysByTarget = new Map();
   for (const targetId of targetIds) {
-    const target = TARGETS[targetId];
+    const target = targetsById[targetId] || TARGETS[targetId];
     if (!target) continue;
     const keys = new Set();
     for (const file of perTargetMap.get(targetId) || []) {
